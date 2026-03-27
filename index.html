@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,225 +9,320 @@
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="style.css">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#e8e8e8">
-  <meta name="theme-color" media="(prefers-color-scheme: dark)"  content="#2d2d2d">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2d2d2d">
 </head>
+
 <body>
-<div id="app">
+  <div id="app">
 
-  <!-- ===================== TOOLBAR ===================== -->
-  <div id="toolbar">
-    <span style="font-weight:700;font-size:14px;letter-spacing:0.05em;margin-right:4px;">SABUN</span>
-    <div class="toolbar-sep"></div>
+    <!-- ===================== TOOLBAR ===================== -->
+    <div id="toolbar">
+      <span style="font-weight:700;font-size:14px;letter-spacing:0.05em;margin-right:4px;">SABUN</span>
+      <div class="toolbar-sep"></div>
 
-    <button class="toolbar-btn" id="btn-open-a" title="A側PDFを開く (Ctrl+A)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-      A を開く
-    </button>
-    <button class="toolbar-btn" id="btn-open-b" title="B側PDFを開く (Ctrl+B)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-      B を開く
-    </button>
+      <button class="toolbar-btn" id="btn-open-a" title="A側PDFを開く (Ctrl+A)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+          <line x1="12" y1="8" x2="12" y2="16" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+        A を開く
+      </button>
+      <button class="toolbar-btn" id="btn-open-b" title="B側PDFを開く (Ctrl+B)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+          <line x1="12" y1="8" x2="12" y2="16" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+        B を開く
+      </button>
 
-    <div class="toolbar-sep"></div>
+      <div class="toolbar-sep"></div>
 
-    <button class="toolbar-btn" id="btn-diff-list" title="差分一覧 (Ctrl+L)" disabled>
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      差分一覧
-    </button>
+      <button class="toolbar-btn" id="btn-diff-list" title="差分一覧 (Ctrl+L)" disabled>
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        差分一覧
+      </button>
 
-    <div class="toolbar-sep"></div>
+      <div class="toolbar-sep"></div>
 
-    <button class="toolbar-btn" id="btn-zoom-out" title="ズームアウト (Ctrl+-)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-    </button>
-    <select id="zoom-combo" title="ズーム倍率" style="font-family:inherit;font-size:12px;background:var(--bg-panel);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:3px 4px;cursor:pointer;">
-      <option>25%</option><option>50%</option><option>75%</option>
-      <option selected>100%</option><option>150%</option><option>200%</option>
-      <option>300%</option><option>400%</option>
-    </select>
-    <span id="zoom-label" class="toolbar-label" style="display:none;">100%</span>
-    <button class="toolbar-btn" id="btn-zoom-in" title="ズームイン (Ctrl++)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-    </button>
-    <button class="toolbar-btn" id="btn-marquee-zoom" title="矩形ズーム (MまたはShift+ドラッグ)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4"/><circle cx="12" cy="12" r="3"/></svg>
-    </button>
-    <button class="toolbar-btn" id="btn-fit" title="ウィンドウに合わせる (Ctrl+0)">フィット</button>
+      <button class="toolbar-btn" id="btn-zoom-out" title="ズームアウト (Ctrl+-)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          <line x1="8" y1="11" x2="14" y2="11" />
+        </svg>
+      </button>
+      <select id="zoom-combo" title="ズーム倍率"
+        style="font-family:inherit;font-size:12px;background:var(--bg-panel);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:3px 4px;cursor:pointer;">
+        <option>25%</option>
+        <option>50%</option>
+        <option>75%</option>
+        <option selected>100%</option>
+        <option>150%</option>
+        <option>200%</option>
+        <option>300%</option>
+        <option>400%</option>
+      </select>
+      <span id="zoom-label" class="toolbar-label" style="display:none;">100%</span>
+      <button class="toolbar-btn" id="btn-zoom-in" title="ズームイン (Ctrl++)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          <line x1="11" y1="8" x2="11" y2="14" />
+          <line x1="8" y1="11" x2="14" y2="11" />
+        </svg>
+      </button>
+      <button class="toolbar-btn" id="btn-marquee-zoom" title="矩形ズーム (MまたはShift+ドラッグ)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
+      <button class="toolbar-btn" id="btn-fit" title="ウィンドウに合わせる (Ctrl+0)">フィット</button>
 
-    <div class="toolbar-sep"></div>
+      <div class="toolbar-sep"></div>
 
-    <button class="toolbar-btn" id="btn-drag-mode" title="パンモード (Ctrl+H / Space)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v5M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v6M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M6 14a2 2 0 0 1 2-2 2 2 0 0 1 2 2v2a5 5 0 0 0 5 5h1a5 5 0 0 0 5-5V6"/></svg>
-      パン
-    </button>
-    <button class="toolbar-btn" id="btn-offset-mode" title="オフセット調整モード — BをA上でドラッグ移動">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/><polyline points="19 9 22 12 19 15"/><polyline points="9 19 12 22 15 19"/></svg>
-      オフセット
-    </button>
-    <button class="toolbar-btn" id="btn-offset-reset" title="オフセットをリセット" style="font-size:11px;padding:3px 8px;">リセット</button>
-    <span id="offset-label" style="font-size:10px;color:var(--text-muted);min-width:80px;">dx:0  dy:0</span>
+      <button class="toolbar-btn" id="btn-drag-mode" title="パンモード (Ctrl+H / Space)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path
+            d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v5M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v6M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8" />
+          <path d="M6 14a2 2 0 0 1 2-2 2 2 0 0 1 2 2v2a5 5 0 0 0 5 5h1a5 5 0 0 0 5-5V6" />
+        </svg>
+        パン
+      </button>
+      <button class="toolbar-btn" id="btn-offset-mode" title="オフセット調整モード — BをA上でドラッグ移動">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <polyline points="5 9 2 12 5 15" />
+          <polyline points="9 5 12 2 15 5" />
+          <line x1="2" y1="12" x2="22" y2="12" />
+          <line x1="12" y1="2" x2="12" y2="22" />
+          <polyline points="19 9 22 12 19 15" />
+          <polyline points="9 19 12 22 15 19" />
+        </svg>
+        オフセット
+      </button>
+      <button class="toolbar-btn" id="btn-offset-reset" title="オフセットをリセット"
+        style="font-size:11px;padding:3px 8px;">リセット</button>
+      <span id="offset-label" style="font-size:10px;color:var(--text-muted);min-width:80px;">dx:0 dy:0</span>
 
-    <div class="toolbar-sep"></div>
+      <div class="toolbar-sep"></div>
 
-    <button class="toolbar-btn" id="btn-export" title="現在のビューを保存 (Ctrl+S)">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      保存
-    </button>
+      <button class="toolbar-btn" id="btn-export" title="現在のビューを保存 (Ctrl+S)">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        保存
+      </button>
 
-    <div class="toolbar-sep"></div>
-    <button class="toolbar-btn" id="btn-help" title="ヘルプ">
-      <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26A1.98 1.98 0 0 0 14 9c0-1.1-.9-2-2-2s-2 .9-2 2H8a4 4 0 0 1 8 0c0 .88-.36 1.68-.93 2.25z"/></svg>
-    </button>
+      <div class="toolbar-sep"></div>
+      <button class="toolbar-btn" id="btn-help" title="ヘルプ">
+        <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
+          <path
+            d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26A1.98 1.98 0 0 0 14 9c0-1.1-.9-2-2-2s-2 .9-2 2H8a4 4 0 0 1 8 0c0 .88-.36 1.68-.93 2.25z" />
+        </svg>
+      </button>
 
-    <!-- hidden file inputs -->
-    <input type="file" id="file-input-a" accept=".pdf" style="display:none">
-    <input type="file" id="file-input-b" accept=".pdf" style="display:none">
-  </div>
-
-  <!-- ===================== MAIN BODY ===================== -->
-  <div id="main-body">
-
-    <!-- ===== SIDEBAR ===== -->
-    <div id="sidebar">
-      <!-- A panel -->
-      <div class="sidebar-pane" style="flex:1;min-height:0;">
-        <div class="sidebar-header">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
-          A ページ
-        </div>
-        <div class="sidebar-filename" id="sidebar-filename-a">（未ロード）</div>
-        <div class="thumb-list" id="thumb-list-a"></div>
-      </div>
-
-      <div class="sidebar-divider"></div>
-
-      <!-- B panel -->
-      <div class="sidebar-pane" style="flex:1;min-height:0;">
-        <div class="sidebar-header">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="#f59e0b"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
-          B ページ
-        </div>
-        <div class="sidebar-filename" id="sidebar-filename-b">（未ロード）</div>
-        <div class="thumb-list" id="thumb-list-b"></div>
-      </div>
+      <!-- hidden file inputs -->
+      <input type="file" id="file-input-a" accept=".pdf" style="display:none">
+      <input type="file" id="file-input-b" accept=".pdf" style="display:none">
     </div>
 
-    <!-- ===== CONTENT ===== -->
-    <div id="content">
-      <!-- IMAGE TAB -->
-      <div class="tab-panel active" id="main-tab-image">
-        <!-- Sub tabs -->
-        <div class="tab-bar" id="image-sub-tab-bar">
-          <button class="tab-btn active" data-sub-tab="a">Aビュー <kbd>1</kbd></button>
-          <button class="tab-btn" data-sub-tab="b">Bビュー <kbd>2</kbd></button>
-          <button class="tab-btn" data-sub-tab="highlight">ハイライト差分 <kbd>3</kbd></button>
-          <button class="tab-btn" data-sub-tab="absdiff">絶対値差 <kbd>4</kbd></button>
-          <button class="tab-btn" data-sub-tab="aori">あおり表示 <kbd>5</kbd></button>
+    <!-- ===================== MAIN BODY ===================== -->
+    <div id="main-body">
 
-          <!-- Aori speed control (visible only when aori is active) -->
-          <div id="aori-controls" style="display:none; margin-left:8px; align-items:center; gap:6px;">
-            <span style="font-size:10px; color:var(--text-muted);">あおり速度:</span>
-            <input type="range" id="aori-speed-slider" min="100" max="1500" value="300" step="10" style="width:70px;">
-            <span id="aori-speed-label" style="font-size:10px; color:var(--text-muted); width:40px;">300ms</span>
-          </div>
-        </div>
-
-        <!-- Canvas view -->
-        <div class="view-container" id="view-container">
-          <canvas id="view-canvas" class="view-canvas" style="display:none;"></canvas>
-          <div id="marquee-box" class="marquee-box"></div>
-          <div class="view-placeholder" id="view-placeholder">
-            <svg width="64" height="64" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" opacity="0.3">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
+      <!-- ===== SIDEBAR ===== -->
+      <div id="sidebar">
+        <!-- A panel -->
+        <div class="sidebar-pane" style="flex:1;min-height:0;">
+          <div class="sidebar-header">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
             </svg>
-            <p>A / B のPDFをドロップまたはボタンで開いてください</p>
-            <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
+            A ページ
           </div>
-          <div id="scan-progress"></div>
+          <div class="sidebar-filename" id="sidebar-filename-a">（未ロード）</div>
+          <div class="thumb-list" id="thumb-list-a"></div>
+        </div>
+
+        <div class="sidebar-divider"></div>
+
+        <!-- B panel -->
+        <div class="sidebar-pane" style="flex:1;min-height:0;">
+          <div class="sidebar-header">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="#f59e0b">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            </svg>
+            B ページ
+          </div>
+          <div class="sidebar-filename" id="sidebar-filename-b">（未ロード）</div>
+          <div class="thumb-list" id="thumb-list-b"></div>
         </div>
       </div>
 
-      <!-- NAV BAR -->
-      <div id="nav-bar">
-        <button class="nav-btn" id="btn-prev" disabled>
-          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-          前のページ
-        </button>
-        <span id="page-info">—</span>
-        <button class="nav-btn" id="btn-next" disabled>
-          次のページ
-          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-        </button>
+      <!-- ===== CONTENT ===== -->
+      <div id="content">
+        <!-- IMAGE TAB -->
+        <div class="tab-panel active" id="main-tab-image">
+          <!-- Sub tabs -->
+          <div class="tab-bar" id="image-sub-tab-bar">
+            <button class="tab-btn active" data-sub-tab="a">Aビュー <kbd>1</kbd></button>
+            <button class="tab-btn" data-sub-tab="b">Bビュー <kbd>2</kbd></button>
+            <button class="tab-btn" data-sub-tab="highlight">ハイライト差分 <kbd>3</kbd></button>
+            <button class="tab-btn" data-sub-tab="absdiff">絶対値差 <kbd>4</kbd></button>
+            <button class="tab-btn" data-sub-tab="aori">あおり表示 <kbd>5</kbd></button>
+
+            <!-- Aori speed control (visible only when aori is active) -->
+            <div id="aori-controls"
+              style="display:none; margin-left:12px; margin-bottom:5px; align-items:center; gap:10px; height:20px;">
+              <span style="font-size:10px; color:var(--text-muted); line-height:1;">あおり速度:</span>
+              <input type="range" id="aori-speed-slider" min="100" max="600" value="300" step="10"
+                style="width:70px; margin:0; cursor:pointer;">
+              <span id="aori-speed-label"
+                style="font-size:10px; color:var(--text-muted); width:50px; line-height:1;">300ms</span>
+            </div>
+          </div>
+
+          <!-- Canvas view -->
+          <div class="view-container" id="view-container">
+            <canvas id="view-canvas" class="view-canvas" style="display:none;"></canvas>
+            <div id="marquee-box" class="marquee-box"></div>
+            <div class="view-placeholder" id="view-placeholder">
+              <svg width="64" height="64" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24"
+                opacity="0.3">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              <p>A / B のPDFをドロップまたはボタンで開いてください</p>
+              <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
+            </div>
+            <div id="scan-progress"></div>
+          </div>
+        </div>
+
+        <!-- NAV BAR -->
+        <div id="nav-bar">
+          <button class="nav-btn" id="btn-prev" disabled>
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+            前のページ
+          </button>
+          <span id="page-info">—</span>
+          <button class="nav-btn" id="btn-next" disabled>
+            次のページ
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATUS BAR -->
+    <div id="statusbar">
+      <span class="status-msg" id="status-msg">SABUNへようこそ！PDFをドラッグ＆ドロップするか、A/Bボタンで開いてください。</span>
+      <span class="status-zoom" id="status-zoom">100%</span>
+    </div>
+  </div>
+
+  <!-- DIFF SUMMARY PANEL -->
+  <div id="diff-summary-panel">
+    <div class="panel-header">
+      <span>⚡️ 差分ページ一覧</span>
+      <button id="btn-close-diff-panel">✕</button>
+    </div>
+    <div class="diff-summary-list" id="diff-summary-list"></div>
+    <div class="diff-summary-nav">
+      <button id="btn-diff-prev">↑ 前の差分</button>
+      <button id="btn-diff-next">↓ 次の差分</button>
+    </div>
+  </div>
+
+  <!-- DROP OVERLAY -->
+  <div id="drop-overlay">PDFをドロップ</div>
+
+  <!-- HELP MODAL -->
+  <div id="help-modal" class="modal">
+    <div class="modal-inner help-modal-inner">
+      <div class="modal-header">
+        <h2>📖 SABUN 使用説明</h2>
+        <button class="modal-close" id="btn-close-help">✕</button>
+      </div>
+      <div class="help-content">
+        <h3>1. ファイルの読み込み</h3>
+        <ul>
+          <li>「A を開く」「B を開く」ボタン、または <kbd>Ctrl+A</kbd> / <kbd>Ctrl+B</kbd></li>
+          <li>画面へのPDFドラッグ&amp;ドロップ</li>
+        </ul>
+        <h3>2. 比較モード</h3>
+        <ul>
+          <li><strong>Aビュー [1]</strong> — 前のPDFを表示</li>
+          <li><strong>Bビュー [2]</strong> — 後のPDFを表示</li>
+          <li><strong>ハイライト差分 [3]</strong> — 増減のピクセルを個別の色で強調</li>
+          <li><strong>絶対値差 [4]</strong> — ピクセルの変更量をグレースケールで表示</li>
+          <li><strong>あおり [5]</strong> — AとBをタイマーで交互に切り替え</li>
+        </ul>
+        <h3>3. ショートカット一覧</h3>
+        <table>
+          <tr>
+            <td><kbd>Ctrl+A/B</kbd></td>
+            <td>A/BのPDFを開く</td>
+          </tr>
+          <tr>
+            <td><kbd>Ctrl+S</kbd></td>
+            <td>現在ビューを画像として保存</td>
+          </tr>
+          <tr>
+            <td><kbd>Ctrl+L</kbd></td>
+            <td>差分一覧パネルの表示/非表示</td>
+          </tr>
+          <tr>
+            <td><kbd>Ctrl+H</kbd></td>
+            <td>パンモード(手のひらツール)</td>
+          </tr>
+          <tr>
+            <td><kbd>M</kbd></td>
+            <td>矩形ズームツール</td>
+          </tr>
+          <tr>
+            <td><kbd>Shift+Drag</kbd></td>
+            <td>(一時的に)矩形ズーム</td>
+          </tr>
+          <tr>
+            <td><kbd>Space</kbd></td>
+            <td>(一時的に)パン移動</td>
+          </tr>
+          <tr>
+            <td><kbd>Ctrl+0</kbd></td>
+            <td>画面にフィット</td>
+          </tr>
+          <tr>
+            <td><kbd>Ctrl++/−</kbd></td>
+            <td>ズームイン/アウト</td>
+          </tr>
+          <tr>
+            <td><kbd>1–5</kbd></td>
+            <td>画像タブの切り替え</td>
+          </tr>
+          <tr>
+            <td><kbd>↑↓</kbd> / <kbd>, .</kbd></td>
+            <td>ページ移動</td>
+          </tr>
+        </table>
       </div>
     </div>
   </div>
 
-  <!-- STATUS BAR -->
-  <div id="statusbar">
-    <span class="status-msg" id="status-msg">SABUNへようこそ！PDFをドラッグ＆ドロップするか、A/Bボタンで開いてください。</span>
-    <span class="status-zoom" id="status-zoom">100%</span>
-  </div>
-</div>
-
-<!-- DIFF SUMMARY PANEL -->
-<div id="diff-summary-panel">
-  <div class="panel-header">
-    <span>⚡️ 差分ページ一覧</span>
-    <button id="btn-close-diff-panel">✕</button>
-  </div>
-  <div class="diff-summary-list" id="diff-summary-list"></div>
-  <div class="diff-summary-nav">
-    <button id="btn-diff-prev">↑ 前の差分</button>
-    <button id="btn-diff-next">↓ 次の差分</button>
-  </div>
-</div>
-
-<!-- DROP OVERLAY -->
-<div id="drop-overlay">PDFをドロップ</div>
-
-<!-- HELP MODAL -->
-<div id="help-modal" class="modal">
-  <div class="modal-inner help-modal-inner">
-    <div class="modal-header">
-      <h2>📖 SABUN 使用説明</h2>
-      <button class="modal-close" id="btn-close-help">✕</button>
-    </div>
-    <div class="help-content">
-      <h3>1. ファイルの読み込み</h3>
-      <ul>
-        <li>「A を開く」「B を開く」ボタン、または <kbd>Ctrl+A</kbd> / <kbd>Ctrl+B</kbd></li>
-        <li>画面へのPDFドラッグ&amp;ドロップ</li>
-      </ul>
-      <h3>2. 比較モード</h3>
-      <ul>
-        <li><strong>Aビュー [1]</strong> — 前のPDFを表示</li>
-        <li><strong>Bビュー [2]</strong> — 後のPDFを表示</li>
-        <li><strong>ハイライト差分 [3]</strong> — 増減のピクセルを個別の色で強調</li>
-        <li><strong>絶対値差 [4]</strong> — ピクセルの変更量をグレースケールで表示</li>
-        <li><strong>あおり [5]</strong> — AとBをタイマーで交互に切り替え</li>
-      </ul>
-      <h3>3. ショートカット一覧</h3>
-      <table>
-        <tr><td><kbd>Ctrl+A/B</kbd></td><td>A/BのPDFを開く</td></tr>
-        <tr><td><kbd>Ctrl+S</kbd></td><td>現在ビューを画像として保存</td></tr>
-        <tr><td><kbd>Ctrl+L</kbd></td><td>差分一覧パネルの表示/非表示</td></tr>
-        <tr><td><kbd>Ctrl+H</kbd></td><td>パンモード(手のひらツール)</td></tr>
-        <tr><td><kbd>M</kbd></td><td>矩形ズームツール</td></tr>
-        <tr><td><kbd>Shift+Drag</kbd></td><td>(一時的に)矩形ズーム</td></tr>
-        <tr><td><kbd>Space</kbd></td><td>(一時的に)パン移動</td></tr>
-        <tr><td><kbd>Ctrl+0</kbd></td><td>画面にフィット</td></tr>
-        <tr><td><kbd>Ctrl++/−</kbd></td><td>ズームイン/アウト</td></tr>
-        <tr><td><kbd>1–5</kbd></td><td>画像タブの切り替え</td></tr>
-        <tr><td><kbd>↑↓</kbd> / <kbd>, .</kbd></td><td>ページ移動</td></tr>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- SCRIPTS -->
-<script src="lib/pixelmatch-browser.js"></script>
-<!-- TEXT COMPARE REMOVED: diff_match_patch is no longer used -->
-<script type="module" src="app.js"></script>
+  <!-- SCRIPTS -->
+  <script src="lib/pixelmatch-browser.js"></script>
+  <!-- TEXT COMPARE REMOVED: diff_match_patch is no longer used -->
+  <script type="module" src="app.js"></script>
 </body>
+
 </html>
