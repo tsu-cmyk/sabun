@@ -12,7 +12,7 @@ const DIFF_THRESHOLD  = 10;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE     = 0.12;
 const MAX_CACHE       = 1; // キャッシュ
-const DPR             = 4.0; // レンダリング品質
+const DPR             = 3.0; // レンダリング品質
 
 // テキスト・フォント
 const PDF_LOAD_OPTS = {
@@ -232,7 +232,9 @@ function hasDiff(imgA, imgB, threshold=10, minPx=10) {
   if (a.length !== b.length) return true;
   let cnt = 0;
   for (let i = 0; i < a.length; i += 4) {
-    if (Math.abs((a[i]*0.299+a[i+1]*0.587+a[i+2]*0.114) - (b[i]*0.299+b[i+1]*0.587+b[i+2]*0.114)) > threshold) {
+    const ya = (a[i]*0.299 + a[i+1]*0.587 + a[i+2]*0.114) | 0;
+    const yb = (b[i]*0.299 + b[i+1]*0.587 + b[i+2]*0.114) | 0;
+    if (Math.abs(ya - yb) > threshold) {
       if (++cnt > minPx) return true;
     }
   }
@@ -614,8 +616,11 @@ async function startDiffScan() {
     try {
       // スキャン用は低解像度でOK(メモリ節約のため scale=1.0)
       const [ia, ib] = await Promise.all([renderPage(state.docA, i, 1.0), renderPage(state.docB, i, 1.0)]);
-      const ibm = applyOffsetAndMatchSizeSimple(ia, ib);
-      if (hasDiff(ia, ibm)) state.diffPages.add(i);
+      if (ia.width !== ib.width || ia.height !== ib.height) {
+        state.diffPages.add(i);
+      } else if (hasDiff(ia, ib)) {
+        state.diffPages.add(i);
+      }
     } catch { state.diffPages.add(i); }
     scanProgress.style.width = Math.round((i + 1) / total * 100) + '%';
     await new Promise(r => setTimeout(r, 0));
