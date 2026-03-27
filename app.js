@@ -12,7 +12,7 @@ const DIFF_THRESHOLD  = 10;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE     = 0.12;
 const MAX_CACHE       = 1; // キャッシュ
-const DPR             = 4.0; // レンダリング品質
+const DPR             = 3.0; // レンダリング品質
 
 // テキスト・フォント
 const PDF_LOAD_OPTS = {
