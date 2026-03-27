@@ -8,7 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────────────────────
-const DIFF_THRESHOLD  = 10;
+const DIFF_THRESHOLD  = 12;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE     = 0.12;
 const MAX_CACHE       = 1; // キャッシュ
