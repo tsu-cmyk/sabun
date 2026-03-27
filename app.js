@@ -307,7 +307,7 @@ function displayImageData(imgData, renderScale) {
   viewCanvas.height = imgData.height;
   // CSSサイズ = (物理px / DPR) → CSSピクセルとしての正規サイズ
   // これにより、compensate=1.0 の時にちょうど zoomFactor 倍の大きさで表示される
-  viewCanvas.style.width  = (imgData.width  / DPR) + 'px';
+  viewCanvas.style.width = (imgData.width / DPR) + 'px';
   viewCanvas.style.height = (imgData.height / DPR) + 'px';
   state.renderScale = rs;
   viewCanvas.getContext('2d').putImageData(imgData, 0, 0);
