@@ -8,7 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────────────────────
-const DIFF_THRESHOLD  = 20;
+const DIFF_THRESHOLD  = 10;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE     = 0.12;
 const MAX_CACHE       = 1; // キャッシュ
@@ -614,11 +614,12 @@ async function startDiffScan() {
   scanProgress.style.width = '0%';
   for (let i = 0; i < total; i++) {
     try {
-      // スキャン用は低解像度でOK(メモリ節約のため scale=1.0)
-      const [ia, ib] = await Promise.all([renderPage(state.docA, i, 1.0), renderPage(state.docB, i, 1.0)]);
+      // Promise.allで並列描写するとpdf.jsのワーカーが競合して文字欠けを起こすことがあるため直列描写
+      const ia = await renderPage(state.docA, i, 1.0);
+      const ib = await renderPage(state.docB, i, 1.0);
       if (ia.width !== ib.width || ia.height !== ib.height) {
         state.diffPages.add(i);
-      } else if (hasDiff(ia, ib)) {
+      } else if (hasDiff(ia, ib, 10, 50)) { // Canvasのアンチエイリアスノイズ吸収のため最低50pxに変更
         state.diffPages.add(i);
       }
     } catch { state.diffPages.add(i); }
