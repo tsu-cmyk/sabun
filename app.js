@@ -33,9 +33,11 @@ const state = {
   pageA: 0, pageB: 0,
   totalA: 0, totalB: 0,
   diffPages: new Set(),
+  fpA: null, fpB: null,
 
   // Pan & Zoom
   zoomFactor: 1.0,
+  renderScale: 0, // 現在キャンバスがレンダリングされたスケール(DPR*zoom)
   panX: 0,
   panY: 0,
 
@@ -139,6 +141,38 @@ async function renderPage(doc, pageIndex, scale = DPR) {
   return ctx.getImageData(0, 0, w, h);
 }
 
+async function scanRenderPage(doc, pageIndex, passes = 2) {
+  const scale = DPR;
+  const page = await doc.getPage(pageIndex + 1);
+  const vp = page.getViewport({ scale });
+  const w = Math.ceil(vp.width);
+  const h = Math.ceil(vp.height);
+
+  // 山算用の浮動小数バッファ
+  const sum = new Float32Array(w * h * 4);
+
+  for (let pass = 0; pass < passes; pass++) {
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    await page.render({
+      canvasContext: ctx, viewport: vp,
+      annotationMode: pdfjsLib.AnnotationMode.DISABLE,
+      intent: 'print',
+    }).promise;
+    const pxData = ctx.getImageData(0, 0, w, h).data;
+    for (let k = 0; k < pxData.length; k++) sum[k] += pxData[k];
+  }
+
+  // 平均値をuint8に成形しImageDataとして返す
+  const out = new ImageData(w, h);
+  for (let k = 0; k < out.data.length; k++) out.data[k] = (sum[k] / passes) | 0;
+  return out;
+}
+
 async function renderThumb(doc, pageIndex) {
   const page = await doc.getPage(pageIndex + 1);
   const vp = page.getViewport({ scale: THUMB_SCALE * DPR });
@@ -164,17 +198,19 @@ function cacheSet(map, key, val) {
   map.delete(key); map.set(key, val);
   if (map.size > MAX_CACHE) map.delete(map.keys().next().value);
 }
-async function getOrRenderA(idx) {
-  let c = cacheGet(cacheA, idx);
+async function getOrRenderA(idx, scale = DPR) {
+  const key = `${idx}_${scale}`;
+  let c = cacheGet(cacheA, key);
   if (c) return c;
-  c = await renderPage(state.docA, idx);
-  cacheSet(cacheA, idx, c); return c;
+  c = await renderPage(state.docA, idx, scale);
+  cacheSet(cacheA, key, c); return c;
 }
-async function getOrRenderB(idx) {
-  let c = cacheGet(cacheB, idx);
+async function getOrRenderB(idx, scale = DPR) {
+  const key = `${idx}_${scale}`;
+  let c = cacheGet(cacheB, key);
   if (c) return c;
-  c = await renderPage(state.docB, idx);
-  cacheSet(cacheB, idx, c); return c;
+  c = await renderPage(state.docB, idx, scale);
+  cacheSet(cacheB, key, c); return c;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -264,12 +300,16 @@ function hasDiff(imgA, imgB, threshold = 15, minPx = 10) {
 // ─────────────────────────────────────────────────────────
 // PAN & ZOOM (Transform Based for Infinite Panning)
 // ─────────────────────────────────────────────────────────
-function displayImageData(imgData) {
+function displayImageData(imgData, renderScale) {
   if (!imgData) { showPlaceholder(); return; }
+  const rs = renderScale || DPR;
   viewCanvas.width = imgData.width;
   viewCanvas.height = imgData.height;
-  viewCanvas.style.width = (imgData.width / DPR) + 'px';
+  // CSSサイズ = (物理px / DPR) → CSSピクセルとしての正規サイズ
+  // これにより、compensate=1.0 の時にちょうど zoomFactor 倍の大きさで表示される
+  viewCanvas.style.width  = (imgData.width  / DPR) + 'px';
   viewCanvas.style.height = (imgData.height / DPR) + 'px';
+  state.renderScale = rs;
   viewCanvas.getContext('2d').putImageData(imgData, 0, 0);
   viewCanvas.style.display = 'block';
   viewPlaceholder.style.display = 'none';
@@ -283,7 +323,11 @@ function showPlaceholder() {
 
 function applyTransform() {
   if (viewCanvas.style.display === 'none') return;
-  viewCanvas.style.transform = `translate(${Math.round(state.panX)}px, ${Math.round(state.panY)}px) scale(${state.zoomFactor})`;
+  // renderScale が DPR*zoom なら compensate=1.0 でクリップ（CSS拡大なし）
+  // ズーム変化直後は古いrenderScaleのままなのでCSS scaleで一時補完する
+  const rs = state.renderScale || DPR;
+  const compensate = state.zoomFactor / (rs / DPR);
+  viewCanvas.style.transform = `translate(${Math.round(state.panX)}px, ${Math.round(state.panY)}px) scale(${compensate})`;
   const pct = Math.round(state.zoomFactor * 100) + '%';
   zoomLabel.textContent = pct;
   statusZoom.textContent = pct;
@@ -291,6 +335,7 @@ function applyTransform() {
 }
 
 function fitToView() {
+  // CSSピクセル幅 = canvas物理px / DPR (1倍ズームのPDF幅)
   const cw = (viewCanvas.width || 1) / DPR;
   const ch = (viewCanvas.height || 1) / DPR;
   const vw = viewContainer.clientWidth;
@@ -300,6 +345,7 @@ function fitToView() {
   state.panX = (vw - cw * state.zoomFactor) / 2;
   state.panY = (vh - ch * state.zoomFactor) / 2;
   applyTransform();
+  scheduleZoomRender();
 }
 
 function zoomAtPoint(px, py, factor) {
@@ -316,11 +362,26 @@ function zoomAtPoint(px, py, factor) {
   state.panX = relX - cx * nz;
   state.panY = relY - cy * nz;
   applyTransform();
+  scheduleZoomRender();
 }
 
 function zoomCenterBy(factor) {
   const rect = viewContainer.getBoundingClientRect();
   zoomAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
+}
+
+
+let _zoomRenderTimer = null;
+function scheduleZoomRender() {
+  if (_zoomRenderTimer) clearTimeout(_zoomRenderTimer);
+  _zoomRenderTimer = setTimeout(async () => {
+    _zoomRenderTimer = null;
+    const targetScale = DPR * Math.max(state.zoomFactor, 1.0);
+    const currentScale = state.renderScale || DPR;
+    if (Math.abs(targetScale - currentScale) / currentScale < 0.15) return;
+    cacheA.clear(); cacheB.clear();
+    await renderCurrentView(false);
+  }, 300);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -530,18 +591,29 @@ document.addEventListener('keyup', e => {
 });
 
 // ─────────────────────────────────────────────────────────
+// PDF FINGERPRINT
+// ─────────────────────────────────────────────────────────
+async function computeFingerprint(ab) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', ab);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─────────────────────────────────────────────────────────
 // LOAD PDF
 // ─────────────────────────────────────────────────────────
 async function loadPDF(side, file) {
   setStatus(`${side === 'a' ? 'A' : 'B'} を読込中: ${file.name}`);
   try {
     const ab = await file.arrayBuffer();
+    const fp = await computeFingerprint(ab);
     const doc = await pdfjsLib.getDocument({ data: ab, ...PDF_LOAD_OPTS }).promise;
     if (side === 'a') {
       state.docA = doc; state.nameA = file.name; state.pageA = 0; state.totalA = doc.numPages;
+      state.fpA = fp;
       filenameA.textContent = shortenName(file.name); cacheA.clear();
     } else {
       state.docB = doc; state.nameB = file.name; state.pageB = 0; state.totalB = doc.numPages;
+      state.fpB = fp;
       filenameB.textContent = shortenName(file.name); cacheB.clear();
     }
     state.diffPages.clear(); buildThumbList(side); updateNavButtons();
@@ -633,18 +705,26 @@ async function startDiffScan() {
   const token = ++_scanToken;
   state.diffPages.clear();
   const total = Math.min(state.totalA, state.totalB);
+
+  if (state.fpA && state.fpA === state.fpB) {
+    setStatus('同一ファイル―差分ゼロです。', 5000);
+    btnDiffList.disabled = false;
+    refreshDiffBadges(); rebuildDiffSummaryPanel();
+    return;
+  }
+
   setStatus(`全自動スキャン中...`);
   scanProgress.style.width = '0%';
   for (let i = 0; i < total; i++) {
     if (token !== _scanToken) return;
     try {
-      const ia = await getOrRenderA(i);
+      const ia = await scanRenderPage(state.docA, i);
       if (token !== _scanToken) return;
-      const ib = await getOrRenderB(i);
+      const ib = await scanRenderPage(state.docB, i);
       if (token !== _scanToken) return;
       if (Math.abs(ia.width - ib.width) > 1 || Math.abs(ia.height - ib.height) > 1) {
         state.diffPages.add(i);
-      } else if (hasDiff(ia, ib, 6, 1)) {
+      } else if (hasDiff(ia, ib, 11, 1)) {
         state.diffPages.add(i);
       }
     } catch { state.diffPages.add(i); }
@@ -682,6 +762,8 @@ async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
   const tab = state.activeSubTab;
 
+  const visualScale = DPR * Math.max(state.zoomFactor, 1.0);
+
   stopAori();
   if (tab === 'aori') aoriControls.style.display = 'flex';
   else aoriControls.style.display = 'none';
@@ -689,20 +771,23 @@ async function renderCurrentView(forceFit = false) {
   // A のみ / B のみ
   if (tab === 'a') {
     if (!state.docA) return showPlaceholder();
-    const img = await getOrRenderA(state.pageA);
+    const img = await getOrRenderA(state.pageA, visualScale);
     if (token !== _renderToken) return;
-    displayImageData(img); if (forceFit) fitToView(); return;
+    displayImageData(img, visualScale); if (forceFit) fitToView(); return;
   }
   if (tab === 'b') {
     if (!state.docB) return showPlaceholder();
-    const img = await getOrRenderB(state.pageB);
+    const img = await getOrRenderB(state.pageB, visualScale);
     if (token !== _renderToken) return;
-    displayImageData(img); if (forceFit) fitToView(); return;
+    displayImageData(img, visualScale); if (forceFit) fitToView(); return;
   }
 
   // A, B 必須
   if (!state.docA || !state.docB) return showPlaceholder();
-  const [imgA, imgBRaw] = await Promise.all([getOrRenderA(state.pageA), getOrRenderB(state.pageB)]);
+  const [imgA, imgBRaw] = await Promise.all([
+    getOrRenderA(state.pageA, visualScale),
+    getOrRenderB(state.pageB, visualScale)
+  ]);
   if (token !== _renderToken) return;
   const imgB = applyOffsetAndMatchSize(imgBRaw, imgA);
 
@@ -710,17 +795,21 @@ async function renderCurrentView(forceFit = false) {
   switch (tab) {
     case 'highlight': res = computeHighlightDiff(imgA, imgB); break;
     case 'absdiff': res = computeAbsDiff(imgA, imgB); break;
-    case 'aori': displayImageData(imgA); if (forceFit) fitToView(); startAori(imgA, imgB); return;
+    case 'aori':
+      displayImageData(imgA, visualScale);
+      if (forceFit) fitToView();
+      startAori(imgA, imgB, visualScale);
+      return;
     default: res = imgA;
   }
-  displayImageData(res);
+  displayImageData(res, visualScale);
   if (forceFit) fitToView();
 }
 
-function startAori(imgA, imgB) {
+function startAori(imgA, imgB, rs) {
   state.aoriImgA = imgA; state.aoriImgB = imgB; state.aoriFlag = false;
   state.aoriTimer = setInterval(() => {
-    displayImageData(state.aoriFlag ? state.aoriImgB : state.aoriImgA);
+    displayImageData(state.aoriFlag ? state.aoriImgB : state.aoriImgA, rs);
     state.aoriFlag = !state.aoriFlag;
   }, state.aoriInterval);
 }
