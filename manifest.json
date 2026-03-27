@@ -1,0 +1,14 @@
+{
+  "name": "SABUN — PDF比較ツール",
+  "short_name": "SABUN",
+  "description": "PDFの差分を高精度で比較するPWAツール",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1e1e1e",
+  "theme_color": "#3b82f6",
+  "lang": "ja",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
