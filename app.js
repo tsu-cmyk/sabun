@@ -8,11 +8,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────────────────────
-const DIFF_THRESHOLD  = 10;
+const DIFF_THRESHOLD = 10;
 const HIGHLIGHT_COLOR = [255, 75, 0];
-const THUMB_SCALE     = 0.12;
-const MAX_CACHE       = 1; // キャッシュ
-const DPR             = 3.0; // レンダリング品質
+const THUMB_SCALE = 0.12;
+const MAX_CACHE = 300;
+const DPR = Math.max(window.devicePixelRatio || 1, 2.5);
 
 // テキスト・フォント
 const PDF_LOAD_OPTS = {
@@ -41,7 +41,7 @@ const state = {
 
   // インタラクションモード
   persistentMode: 'cursor', // 'cursor'|'drag'|'offset'|'zoom_in'|'zoom_out'|'marquee'
-  activeMode:     'cursor',
+  activeMode: 'cursor',
   tempModeActive: false,
   keysDown: new Set(),
 
@@ -69,38 +69,38 @@ const cacheB = new Map();
 // ─────────────────────────────────────────────────────────
 // DOM refs
 // ─────────────────────────────────────────────────────────
-const $  = id => document.getElementById(id);
+const $ = id => document.getElementById(id);
 const viewContainer = $('view-container');
-const viewCanvas    = $('view-canvas');
+const viewCanvas = $('view-canvas');
 const viewPlaceholder = $('view-placeholder');
-const marqueeBox    = $('marquee-box');
-const scanProgress  = $('scan-progress');
-const zoomLabel     = $('zoom-label');
-const statusZoom    = $('status-zoom');
-const statusMsg     = $('status-msg');
-const pageInfo      = $('page-info');
-const thumbListA    = $('thumb-list-a');
-const thumbListB    = $('thumb-list-b');
-const filenameA     = $('sidebar-filename-a');
-const filenameB     = $('sidebar-filename-b');
-const diffPanel     = $('diff-summary-panel');
-const diffList      = $('diff-summary-list');
-const dropOverlay   = $('drop-overlay');
+const marqueeBox = $('marquee-box');
+const scanProgress = $('scan-progress');
+const zoomLabel = $('zoom-label');
+const statusZoom = $('status-zoom');
+const statusMsg = $('status-msg');
+const pageInfo = $('page-info');
+const thumbListA = $('thumb-list-a');
+const thumbListB = $('thumb-list-b');
+const filenameA = $('sidebar-filename-a');
+const filenameB = $('sidebar-filename-b');
+const diffPanel = $('diff-summary-panel');
+const diffList = $('diff-summary-list');
+const dropOverlay = $('drop-overlay');
 
-const btnDragMode    = $('btn-drag-mode');
-const btnOffsetMode  = $('btn-offset-mode');
+const btnDragMode = $('btn-drag-mode');
+const btnOffsetMode = $('btn-offset-mode');
 const btnOffsetReset = $('btn-offset-reset');
 const btnMarqueeZoom = $('btn-marquee-zoom');
-const btnDiffList    = $('btn-diff-list');
-const zoomCombo      = $('zoom-combo');
+const btnDiffList = $('btn-diff-list');
+const zoomCombo = $('zoom-combo');
 
-const aoriControls   = $('aori-controls');
-const aoriSpeedSlider= $('aori-speed-slider');
+const aoriControls = $('aori-controls');
+const aoriSpeedSlider = $('aori-speed-slider');
 const aoriSpeedLabel = $('aori-speed-label');
 
-const btnHelp        = $('btn-help');
-const helpModal      = $('help-modal');
-const btnCloseHelp   = $('btn-close-help');
+const btnHelp = $('btn-help');
+const helpModal = $('help-modal');
+const btnCloseHelp = $('btn-close-help');
 
 // ─────────────────────────────────────────────────────────
 // STATUS
@@ -118,20 +118,22 @@ function setStatus(msg, duration = 0) {
 async function renderPage(doc, pageIndex, scale = DPR) {
   const page = await doc.getPage(pageIndex + 1);
   const vp = page.getViewport({ scale });
-  const w  = Math.ceil(vp.width);
-  const h  = Math.ceil(vp.height);
+  const w = Math.ceil(vp.width);
+  const h = Math.ceil(vp.height);
 
   const canvas = document.createElement('canvas');
-  canvas.width  = w;
+  canvas.width = w;
   canvas.height = h;
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
 
   await page.render({
     canvasContext: ctx,
     viewport: vp,
-    annotationMode: pdfjsLib.AnnotationMode.DISABLE
+    annotationMode: pdfjsLib.AnnotationMode.DISABLE,
+    intent: 'print',
   }).promise;
 
   return ctx.getImageData(0, 0, w, h);
@@ -141,7 +143,7 @@ async function renderThumb(doc, pageIndex) {
   const page = await doc.getPage(pageIndex + 1);
   const vp = page.getViewport({ scale: THUMB_SCALE * DPR });
   const canvas = document.createElement('canvas');
-  canvas.width  = Math.ceil(vp.width);
+  canvas.width = Math.ceil(vp.width);
   canvas.height = Math.ceil(vp.height);
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.fillStyle = '#ffffff';
@@ -151,7 +153,7 @@ async function renderThumb(doc, pageIndex) {
 }
 
 // ─────────────────────────────────────────────────────────
-// CACHE (軽量化のためLRU削減)
+// CACHE
 // ─────────────────────────────────────────────────────────
 function cacheGet(map, key) {
   if (!map.has(key)) return null;
@@ -196,20 +198,24 @@ function computeHighlightDiff(imgA, imgB) {
   const w = imgA.width, h = imgA.height;
   const out = new ImageData(w, h);
   const a = imgA.data, b = imgB.data, o = out.data;
-  const thr = DIFF_THRESHOLD;
+
+  const pmOut = new Uint8Array(w * h * 4);
+  window.pixelmatch(a, b, pmOut, w, h, { threshold: DIFF_THRESHOLD / 255.0, includeAA: false });
+
   for (let i = 0, n = w * h; i < n; i++) {
     const p = i * 4;
-    const ya = a[p]*0.299 + a[p+1]*0.587 + a[p+2]*0.114;
-    const yb = b[p]*0.299 + b[p+1]*0.587 + b[p+2]*0.114;
-    const diff = ya - yb;
-    if (Math.abs(diff) > thr) {
-      if (diff > 0) {
-        o[p]=255; o[p+1]=75; o[p+2]=0; o[p+3]=255;
+    const isDiff = (pmOut[p] === 255 && pmOut[p + 1] === 0 && pmOut[p + 2] === 0 && pmOut[p + 3] === 255);
+
+    if (isDiff) {
+      const ya = a[p] * 0.299 + a[p + 1] * 0.587 + a[p + 2] * 0.114;
+      const yb = b[p] * 0.299 + b[p + 1] * 0.587 + b[p + 2] * 0.114;
+      if (ya > yb) {
+        o[p] = 255; o[p + 1] = 75; o[p + 2] = 0; o[p + 3] = 255;
       } else {
-        o[p]=0; o[p+1]=196; o[p+2]=255; o[p+3]=255;
+        o[p] = 0; o[p + 1] = 196; o[p + 2] = 255; o[p + 3] = 255;
       }
     } else {
-      o[p]=(a[p]*0.3)|0; o[p+1]=(a[p+1]*0.3)|0; o[p+2]=(a[p+2]*0.3)|0; o[p+3]=255;
+      o[p] = (a[p] * 0.3) | 0; o[p + 1] = (a[p + 1] * 0.3) | 0; o[p + 2] = (a[p + 2] * 0.3) | 0; o[p + 3] = 255;
     }
   }
   return out;
@@ -221,21 +227,35 @@ function computeAbsDiff(imgA, imgB) {
   const a = imgA.data, b = imgB.data, o = out.data;
   for (let i = 0, n = w * h; i < n; i++) {
     const p = i * 4;
-    const d = Math.abs((a[p]*0.299+a[p+1]*0.587+a[p+2]*0.114) - (b[p]*0.299+b[p+1]*0.587+b[p+2]*0.114))|0;
-    o[p]=d; o[p+1]=d; o[p+2]=d; o[p+3]=255;
+    const d = Math.abs((a[p] * 0.299 + a[p + 1] * 0.587 + a[p + 2] * 0.114) - (b[p] * 0.299 + b[p + 1] * 0.587 + b[p + 2] * 0.114)) | 0;
+    o[p] = d; o[p + 1] = d; o[p + 2] = d; o[p + 3] = 255;
   }
   return out;
 }
 
-function hasDiff(imgA, imgB, threshold=10, minPx=10) {
+// ──────────────────────────────────────────────────────────────────────────
+// hasDiff: 2x2ブロック平均化グレースケール比較
+// ──────────────────────────────────────────────────────────────────────────
+function hasDiff(imgA, imgB, threshold = 15, minPx = 10) {
+  if (imgA.width !== imgB.width || imgA.height !== imgB.height) return true;
+  const w = imgA.width, h = imgA.height;
   const a = imgA.data, b = imgB.data;
-  if (a.length !== b.length) return true;
+  const W = Math.floor(w / 2), H = Math.floor(h / 2);
   let cnt = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    const ya = (a[i]*0.299 + a[i+1]*0.587 + a[i+2]*0.114) | 0;
-    const yb = (b[i]*0.299 + b[i+1]*0.587 + b[i+2]*0.114) | 0;
-    if (Math.abs(ya - yb) > threshold) {
-      if (++cnt > minPx) return true;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let ga = 0, gb = 0;
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const p = ((y * 2 + dy) * w + (x * 2 + dx)) * 4;
+          ga += a[p] * 0.299 + a[p + 1] * 0.587 + a[p + 2] * 0.114;
+          gb += b[p] * 0.299 + b[p + 1] * 0.587 + b[p + 2] * 0.114;
+        }
+      }
+      ga /= 4; gb /= 4;
+      if (Math.abs(ga - gb) > threshold) {
+        if (++cnt > minPx) return true;
+      }
     }
   }
   return false;
@@ -246,8 +266,10 @@ function hasDiff(imgA, imgB, threshold=10, minPx=10) {
 // ─────────────────────────────────────────────────────────
 function displayImageData(imgData) {
   if (!imgData) { showPlaceholder(); return; }
-  viewCanvas.width  = imgData.width;
+  viewCanvas.width = imgData.width;
   viewCanvas.height = imgData.height;
+  viewCanvas.style.width = (imgData.width / DPR) + 'px';
+  viewCanvas.style.height = (imgData.height / DPR) + 'px';
   viewCanvas.getContext('2d').putImageData(imgData, 0, 0);
   viewCanvas.style.display = 'block';
   viewPlaceholder.style.display = 'none';
@@ -261,7 +283,7 @@ function showPlaceholder() {
 
 function applyTransform() {
   if (viewCanvas.style.display === 'none') return;
-  viewCanvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoomFactor})`;
+  viewCanvas.style.transform = `translate(${Math.round(state.panX)}px, ${Math.round(state.panY)}px) scale(${state.zoomFactor})`;
   const pct = Math.round(state.zoomFactor * 100) + '%';
   zoomLabel.textContent = pct;
   statusZoom.textContent = pct;
@@ -269,8 +291,8 @@ function applyTransform() {
 }
 
 function fitToView() {
-  const cw = viewCanvas.width || 1;
-  const ch = viewCanvas.height || 1;
+  const cw = (viewCanvas.width || 1) / DPR;
+  const ch = (viewCanvas.height || 1) / DPR;
   const vw = viewContainer.clientWidth;
   const vh = viewContainer.clientHeight;
   const margin = 40;
@@ -305,30 +327,29 @@ function zoomCenterBy(factor) {
 // INTERACTION MODE
 // ─────────────────────────────────────────────────────────
 const CURSORS = {
-  cursor:   'default',
-  drag:     'grab',
-  offset:   'move',
-  zoom_in:  'zoom-in',
+  cursor: 'default',
+  drag: 'grab',
+  offset: 'move',
+  zoom_in: 'zoom-in',
   zoom_out: 'zoom-out',
-  marquee:  'crosshair',
+  marquee: 'crosshair',
 };
 
 function updateModeFromKeys() {
-  const isCtrl  = state.keysDown.has('Control') || state.keysDown.has('Meta');
-  const isAlt   = state.keysDown.has('Alt');
+  const isCtrl = state.keysDown.has('Control') || state.keysDown.has('Meta');
+  const isAlt = state.keysDown.has('Alt');
   const isSpace = state.keysDown.has(' ');
   const isShift = state.keysDown.has('Shift');
 
   let newMode = state.persistentMode;
-  let isTemp  = false;
+  let isTemp = false;
 
-  // オフセットモード中じゃない場合のみ、Shiftでの短形ズームを許可する
   if (isShift && !isSpace && !isCtrl && !isAlt && state.persistentMode !== 'offset') {
     newMode = 'marquee'; isTemp = true;
   } else if (isSpace) {
     if (isCtrl && isAlt) { newMode = 'zoom_out'; isTemp = true; }
-    else if (isCtrl)     { newMode = 'zoom_in';  isTemp = true; }
-    else                 { newMode = 'drag';      isTemp = true; }
+    else if (isCtrl) { newMode = 'zoom_in'; isTemp = true; }
+    else { newMode = 'drag'; isTemp = true; }
   }
 
   state.tempModeActive = isTemp;
@@ -374,8 +395,8 @@ viewContainer.addEventListener('mousedown', e => {
     e.preventDefault();
     state.marqueeStart = { x: mouseX, y: mouseY };
     marqueeBox.style.left = mouseX + 'px';
-    marqueeBox.style.top  = mouseY + 'px';
-    marqueeBox.style.width  = '0px';
+    marqueeBox.style.top = mouseY + 'px';
+    marqueeBox.style.width = '0px';
     marqueeBox.style.height = '0px';
     marqueeBox.style.display = 'block';
   }
@@ -393,9 +414,9 @@ viewContainer.addEventListener('mousemove', e => {
     applyTransform();
   } else if (state.offsetDragStart) {
     const d = state.offsetDragStart;
-    const newDx = d.dx + (e.clientX - d.x) * (1/state.zoomFactor);
-    const newDy = d.dy + (e.clientY - d.y) * (1/state.zoomFactor);
-    if (e.shiftKey && e.altKey) { state.offsetDx = newDx; state.offsetDy = newDy; } 
+    const newDx = d.dx + (e.clientX - d.x) * (1 / state.zoomFactor);
+    const newDy = d.dy + (e.clientY - d.y) * (1 / state.zoomFactor);
+    if (e.shiftKey && e.altKey) { state.offsetDx = newDx; state.offsetDy = newDy; }
     else if (e.shiftKey) state.offsetDx = newDx;
     else if (e.altKey) state.offsetDy = newDy;
     else { state.offsetDx = newDx; state.offsetDy = newDy; }
@@ -406,8 +427,8 @@ viewContainer.addEventListener('mousemove', e => {
     const w = Math.abs(mouseX - state.marqueeStart.x);
     const h = Math.abs(mouseY - state.marqueeStart.y);
     marqueeBox.style.left = x + 'px';
-    marqueeBox.style.top  = y + 'px';
-    marqueeBox.style.width  = w + 'px';
+    marqueeBox.style.top = y + 'px';
+    marqueeBox.style.width = w + 'px';
     marqueeBox.style.height = h + 'px';
   }
 });
@@ -430,7 +451,7 @@ function finishMarqueeZoom(mouseX, mouseY) {
   const vw = viewContainer.clientWidth;
   const vh = viewContainer.clientHeight;
   const nz = Math.min(vw / cw, vh / ch, 10);
-  
+
   const newPanX = (vw - cw * nz) / 2 - cx * nz;
   const newPanY = (vh - ch * nz) / 2 - cy * nz;
 
@@ -474,20 +495,20 @@ document.addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); return; }
 
   const ctrl = e.ctrlKey || e.metaKey;
-  const alt  = e.altKey;
+  const alt = e.altKey;
 
   // ページ移動
-  if (!ctrl && (e.key === ',' || e.key === 'ArrowUp'))   { e.preventDefault(); changePage(-1); return; }
-  if (!ctrl && (e.key === '.' || e.key === 'ArrowDown')) { e.preventDefault(); changePage(1);  return; }
+  if (!ctrl && (e.key === ',' || e.key === 'ArrowUp')) { e.preventDefault(); changePage(-1); return; }
+  if (!ctrl && (e.key === '.' || e.key === 'ArrowDown')) { e.preventDefault(); changePage(1); return; }
 
   // ズーム
   if (ctrl && (e.key === '+' || e.key === '=')) { e.preventDefault(); zoomCenterBy(1.25); return; }
-  if (ctrl && e.key === '-')  { e.preventDefault(); zoomCenterBy(0.8); return; }
-  if (ctrl && e.key === '0')  { e.preventDefault(); fitToView(); return; }
+  if (ctrl && e.key === '-') { e.preventDefault(); zoomCenterBy(0.8); return; }
+  if (ctrl && e.key === '0') { e.preventDefault(); fitToView(); return; }
 
   // 丸ボタン/サブタブ切替
   if (!ctrl && !alt && /^[1-5]$/.test(e.key)) {
-    const tabMap = ['a','b','highlight','absdiff','aori'];
+    const tabMap = ['a', 'b', 'highlight', 'absdiff', 'aori'];
     switchSubTab(tabMap[parseInt(e.key) - 1]); return;
   }
 
@@ -514,7 +535,7 @@ document.addEventListener('keyup', e => {
 async function loadPDF(side, file) {
   setStatus(`${side === 'a' ? 'A' : 'B'} を読込中: ${file.name}`);
   try {
-    const ab  = await file.arrayBuffer();
+    const ab = await file.arrayBuffer();
     const doc = await pdfjsLib.getDocument({ data: ab, ...PDF_LOAD_OPTS }).promise;
     if (side === 'a') {
       state.docA = doc; state.nameA = file.name; state.pageA = 0; state.totalA = doc.numPages;
@@ -546,8 +567,8 @@ function shortenName(name, max = 26) {
 // THUMBNAILS
 // ─────────────────────────────────────────────────────────
 function buildThumbList(side) {
-  const list  = side === 'a' ? thumbListA : thumbListB;
-  const doc   = side === 'a' ? state.docA  : state.docB;
+  const list = side === 'a' ? thumbListA : thumbListB;
+  const doc = side === 'a' ? state.docA : state.docB;
   const total = doc ? doc.numPages : 0;
   list.innerHTML = '';
   for (let i = 0; i < total; i++) {
@@ -575,7 +596,7 @@ async function generateThumbs(side, doc, total) {
   for (let i = 0; i < total; i++) {
     try {
       const url = await renderThumb(doc, i);
-      const ph  = document.getElementById(`th-${side}-${i}`);
+      const ph = document.getElementById(`th-${side}-${i}`);
       if (ph) {
         const img = document.createElement('img');
         img.src = url; img.className = 'thumb-img';
@@ -585,7 +606,7 @@ async function generateThumbs(side, doc, total) {
   }
 }
 function updateThumbHighlight(side) {
-  const list    = side === 'a' ? thumbListA : thumbListB;
+  const list = side === 'a' ? thumbListA : thumbListB;
   const curPage = side === 'a' ? state.pageA : state.pageB;
   list.querySelectorAll('.thumb-item').forEach(el => {
     const active = parseInt(el.dataset.page) === curPage;
@@ -606,42 +627,51 @@ function refreshDiffBadges() {
 // ─────────────────────────────────────────────────────────
 // BACKGROUND DIFF SCAN
 // ─────────────────────────────────────────────────────────
+let _scanToken = 0;
 async function startDiffScan() {
   if (!state.docA || !state.docB) return;
+  const token = ++_scanToken;
   state.diffPages.clear();
   const total = Math.min(state.totalA, state.totalB);
   setStatus(`全自動スキャン中...`);
   scanProgress.style.width = '0%';
   for (let i = 0; i < total; i++) {
+    if (token !== _scanToken) return;
     try {
-      // Promise.allで並列描写するとpdf.jsのワーカーが競合して文字欠けを起こすことがあるため直列描写
-      const ia = await renderPage(state.docA, i, 1.0);
-      const ib = await renderPage(state.docB, i, 1.0);
-      if (ia.width !== ib.width || ia.height !== ib.height) {
+      const ia = await getOrRenderA(i);
+      if (token !== _scanToken) return;
+      const ib = await getOrRenderB(i);
+      if (token !== _scanToken) return;
+      if (Math.abs(ia.width - ib.width) > 1 || Math.abs(ia.height - ib.height) > 1) {
         state.diffPages.add(i);
-      } else if (hasDiff(ia, ib, 10, 50)) { // Canvasのアンチエイリアスノイズ吸収のため最低50pxに変更
+      } else if (hasDiff(ia, ib, 6, 1)) {
         state.diffPages.add(i);
       }
     } catch { state.diffPages.add(i); }
+    if (token !== _scanToken) return;
     scanProgress.style.width = Math.round((i + 1) / total * 100) + '%';
     await new Promise(r => setTimeout(r, 0));
   }
+  if (token !== _scanToken) return;
   scanProgress.style.width = '0%';
   setStatus(`${state.diffPages.size}ページに差分があります。`, 5000);
   btnDiffList.disabled = false;
   refreshDiffBadges(); rebuildDiffSummaryPanel();
 }
 function applyOffsetAndMatchSizeSimple(imgA, imgB) {
-  if (imgA.width === imgB.width && imgA.height === imgB.height && state.offsetDx === 0 && state.offsetDy === 0) return imgB;
+  const dx = Math.round(state.offsetDx * DPR);
+  const dy = Math.round(state.offsetDy * DPR);
+  if (imgA.width === imgB.width && imgA.height === imgB.height && dx === 0 && dy === 0) return imgB;
   const c = document.createElement('canvas');
   c.width = imgA.width; c.height = imgA.height;
-  const ctx = c.getContext('2d', {alpha:false});
-  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,c.width,c.height);
+  const ctx = c.getContext('2d', { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
   const tmp = document.createElement('canvas');
   tmp.width = imgB.width; tmp.height = imgB.height;
   tmp.getContext('2d').putImageData(imgB, 0, 0);
-  ctx.drawImage(tmp, state.offsetDx, state.offsetDy, imgB.width, imgB.height);
-  return ctx.getImageData(0,0,imgA.width,imgA.height);
+  ctx.drawImage(tmp, dx, dy, imgB.width, imgB.height);
+  return ctx.getImageData(0, 0, imgA.width, imgA.height);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -651,8 +681,8 @@ let _renderToken = 0;
 async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
   const tab = state.activeSubTab;
-  
-  stopAori(); 
+
+  stopAori();
   if (tab === 'aori') aoriControls.style.display = 'flex';
   else aoriControls.style.display = 'none';
 
@@ -679,9 +709,9 @@ async function renderCurrentView(forceFit = false) {
   let res;
   switch (tab) {
     case 'highlight': res = computeHighlightDiff(imgA, imgB); break;
-    case 'absdiff':   res = computeAbsDiff(imgA, imgB); break;
-    case 'aori':      displayImageData(imgA); if (forceFit) fitToView(); startAori(imgA, imgB); return;
-    default:          res = imgA;
+    case 'absdiff': res = computeAbsDiff(imgA, imgB); break;
+    case 'aori': displayImageData(imgA); if (forceFit) fitToView(); startAori(imgA, imgB); return;
+    default: res = imgA;
   }
   displayImageData(res);
   if (forceFit) fitToView();
@@ -721,7 +751,7 @@ function changePage(delta) {
   let changed = false;
   if (state.docA && state.pageA + delta >= 0 && state.pageA + delta < state.totalA) { state.pageA += delta; changed = true; }
   if (state.docB && state.pageB + delta >= 0 && state.pageB + delta < state.totalB) { state.pageB += delta; changed = true; }
-  if (changed) { syncPageIndex(); renderCurrentView(true); } 
+  if (changed) { syncPageIndex(); renderCurrentView(true); }
 }
 function goToPage(idx) {
   let changed = false;
@@ -735,7 +765,7 @@ function goToPage(idx) {
 // ─────────────────────────────────────────────────────────
 function resetOffset() {
   state.offsetDx = 0; state.offsetDy = 0; updateOffsetLabel();
-  if (['highlight','absdiff','aori'].includes(state.activeSubTab)) renderCurrentView();
+  if (['highlight', 'absdiff', 'aori'].includes(state.activeSubTab)) renderCurrentView();
 }
 function updateOffsetLabel() {
   const lbl = document.getElementById('offset-label');
@@ -751,14 +781,14 @@ function rebuildDiffSummaryPanel() {
   for (let i = 0; i < total; i++) {
     const hasDiff = state.diffPages.has(i);
     const div = document.createElement('div');
-    div.className = `diff-summary-item${hasDiff?' has-diff':''}${i === state.pageA?' current':''}`;
+    div.className = `diff-summary-item${hasDiff ? ' has-diff' : ''}${i === state.pageA ? ' current' : ''}`;
     div.textContent = (hasDiff ? '⚡️ ' : '') + `Page ${i + 1}`;
     div.addEventListener('click', () => { goToPage(i); rebuildDiffSummaryPanel(); });
     diffList.appendChild(div);
   }
 }
 function jumpToDiff(dir) {
-  const sorted = [...state.diffPages].sort((a,b) => a - b);
+  const sorted = [...state.diffPages].sort((a, b) => a - b);
   if (!sorted.length) return;
   const cur = state.pageA;
   const target = dir === 'next' ? (sorted.find(p => p > cur) ?? sorted[0]) : ([...sorted].reverse().find(p => p < cur) ?? sorted[sorted.length - 1]);
@@ -776,7 +806,7 @@ function toggleDiffPanel() {
 function exportCurrentView() {
   if (viewCanvas.style.display === 'none') { setStatus('表示中の画像がありません', 3000); return; }
   const link = document.createElement('a');
-  link.download = `sabun_${state.activeSubTab}_A${state.pageA+1}_B${state.pageB+1}.png`;
+  link.download = `sabun_${state.activeSubTab}_A${state.pageA + 1}_B${state.pageB + 1}.png`;
   link.href = viewCanvas.toDataURL('image/png');
   link.click();
   setStatus('画像を保存しました。', 3000);
@@ -803,14 +833,14 @@ document.addEventListener('drop', async e => {
 // ─────────────────────────────────────────────────────────
 $('btn-open-a').addEventListener('click', () => $('file-input-a').click());
 $('btn-open-b').addEventListener('click', () => $('file-input-b').click());
-$('file-input-a').addEventListener('change', e => { if (e.target.files[0]) loadPDF('a', e.target.files[0]); e.target.value=''; });
-$('file-input-b').addEventListener('change', e => { if (e.target.files[0]) loadPDF('b', e.target.files[0]); e.target.value=''; });
+$('file-input-a').addEventListener('change', e => { if (e.target.files[0]) loadPDF('a', e.target.files[0]); e.target.value = ''; });
+$('file-input-b').addEventListener('change', e => { if (e.target.files[0]) loadPDF('b', e.target.files[0]); e.target.value = ''; });
 
-$('btn-zoom-in').addEventListener('click',  () => zoomCenterBy(1.25));
+$('btn-zoom-in').addEventListener('click', () => zoomCenterBy(1.25));
 $('btn-zoom-out').addEventListener('click', () => zoomCenterBy(0.8));
 $('btn-fit').addEventListener('click', fitToView);
 $('btn-drag-mode').addEventListener('click', () => setPersistentMode('drag'));
-if (btnOffsetMode)  btnOffsetMode.addEventListener('click', () => setPersistentMode('offset'));
+if (btnOffsetMode) btnOffsetMode.addEventListener('click', () => setPersistentMode('offset'));
 if (btnOffsetReset) btnOffsetReset.addEventListener('click', resetOffset);
 if (btnMarqueeZoom) btnMarqueeZoom.addEventListener('click', () => setPersistentMode('marquee'));
 
@@ -854,4 +884,4 @@ aoriSpeedSlider.addEventListener('input', () => {
 
 window.addEventListener('resize', () => { if (viewCanvas.style.display !== 'none') applyTransform(); });
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
