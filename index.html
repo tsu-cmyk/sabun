@@ -46,6 +46,7 @@
         </svg>
         差分一覧
       </button>
+      <span id="diff-count-badge" style="display:none; font-size:11px; font-weight:700; color:var(--diff-badge); padding:2px 6px; background:rgba(245,158,11,0.12); border-radius:10px; pointer-events:none;"></span>
 
       <div class="toolbar-sep"></div>
 
@@ -213,7 +214,7 @@
             </svg>
             前のページ
           </button>
-          <span id="page-info">—</span>
+          <span id="page-info" title="クリックしてページ番号を入力" style="cursor:pointer;">—</span>
           <button class="nav-btn" id="btn-next" disabled>
             次のページ
             <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -234,8 +235,24 @@
   <!-- DIFF SUMMARY PANEL -->
   <div id="diff-summary-panel">
     <div class="panel-header">
-      <span>⚡️ 差分ページ一覧</span>
-      <button id="btn-close-diff-panel">✕</button>
+      <span>⚡️ 差分ページ一覧
+        <span id="diff-panel-badge" style="
+          display:none; margin-left:6px;
+          font-size:11px; font-weight:700;
+          background:var(--diff-badge); color:#000;
+          padding:1px 7px; border-radius:10px;
+          vertical-align:middle;
+        "></span>
+      </span>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <button id="btn-diff-filter" title="差分ページのみ表示" style="
+          background:none; border:1px solid var(--border);
+          border-radius:4px; padding:2px 6px;
+          font-size:10px; cursor:pointer;
+          color:var(--text-muted);
+        ">絞り込み</button>
+        <button id="btn-close-diff-panel">✕</button>
+      </div>
     </div>
     <div class="diff-summary-list" id="diff-summary-list"></div>
     <div class="diff-summary-nav">
@@ -311,8 +328,28 @@
             <td>画像タブの切り替え</td>
           </tr>
           <tr>
+            <td><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></td>
+            <td>次/前の差分ページへジャンプ</td>
+          </tr>
+          <tr>
             <td><kbd>↑↓</kbd> / <kbd>, .</kbd></td>
-            <td>ページ移動</td>
+            <td>ページ移動（あおり中も継続）</td>
+          </tr>
+          <tr>
+            <td><kbd>F</kbd></td>
+            <td>あおり速度サイクル（遅い/普通/速い）※あおりタブのみ</td>
+          </tr>
+          <tr>
+            <td><kbd>↑↓←→</kbd></td>
+            <td>オフセット1px微調整 ※オフセットモード時</td>
+          </tr>
+          <tr>
+            <td><kbd>Shift+↑↓←→</kbd></td>
+            <td>オフセット10px移動 ※オフセットモード時</td>
+          </tr>
+          <tr>
+            <td>ページ番号クリック</td>
+            <td>任意ページへジャンプ（Enter確定 / Escキャンセル）</td>
           </tr>
         </table>
       </div>
