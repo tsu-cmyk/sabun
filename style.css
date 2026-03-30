@@ -530,6 +530,16 @@ body {
   color: var(--text-secondary);
   min-width: 90px;
   text-align: center;
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  transition: background 0.15s, color 0.15s;
+  cursor: pointer;
+  user-select: none;
+}
+
+#page-info:hover {
+  background: var(--bg-thumb-hover);
+  color: var(--text-primary);
 }
 
 /* ---------- Text Compare View ---------- */
@@ -869,4 +879,15 @@ kbd {
   width: 0%;
   transition: width 0.3s;
   z-index: 5;
+}
+
+/* ---------- Diff panel badge pop-in ---------- */
+@keyframes badge-pop {
+  0%   { transform: scale(0.7); opacity: 0; }
+  70%  { transform: scale(1.15); }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+#diff-panel-badge {
+  animation: badge-pop 0.3s ease-out;
 }
