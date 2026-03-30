@@ -11,8 +11,13 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 const DIFF_THRESHOLD = 10;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE = 0.12;
-const MAX_CACHE = 300;
-const DPR = Math.max(window.devicePixelRatio || 1, 2.5);
+// キャッシュの合計バイト上限 (200 MB)
+const MAX_CACHE_BYTES = 200 * 1024 * 1024;
+// デバイスピクセル比を利用するが、上限 2.0 に指定。
+// 最低値も 1.0 とし（非 Retina での面積リドゥース）。
+const DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1.0), 2.0);
+// ズーム時の再レンダリング上限スケール。
+const MAX_RENDER_SCALE = 3.0;
 
 // テキスト・フォント
 const PDF_LOAD_OPTS = {
@@ -55,18 +60,22 @@ const state = {
   // オフセット
   offsetDx: 0,
   offsetDy: 0,
+  isOffsetDragging: false,
 
   // あおり
   aoriTimer: null, aoriFlag: false, aoriImgA: null, aoriImgB: null,
   aoriInterval: 300,
+  aoriSpeeds: [600, 300, 150], // 遅い・普通・速い
+  aoriSpeedIdx: 1,             // 初期値: 普通(300ms)
 
   // タブ
   activeSubTab: 'a',
+
+  // 差分フィルター
+  diffFilterOnly: false,
 };
 
-// LRU キャッシュ
-const cacheA = new Map();
-const cacheB = new Map();
+
 
 // ─────────────────────────────────────────────────────────
 // DOM refs
@@ -141,36 +150,30 @@ async function renderPage(doc, pageIndex, scale = DPR) {
   return ctx.getImageData(0, 0, w, h);
 }
 
-async function scanRenderPage(doc, pageIndex, passes = 2) {
-  const scale = DPR;
+// scanRenderPage: スキャン専用・低解像度 1パスのみ。
+// アンチエイリアス対策は threshold 側で吸収するのでパス平均は不要。
+async function scanRenderPage(doc, pageIndex) {
+  const scale = 1.0;
   const page = await doc.getPage(pageIndex + 1);
   const vp = page.getViewport({ scale });
   const w = Math.ceil(vp.width);
   const h = Math.ceil(vp.height);
 
-  // 山算用の浮動小数バッファ
-  const sum = new Float32Array(w * h * 4);
-
-  for (let pass = 0; pass < passes; pass++) {
-    const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
-    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
-    ctx.imageSmoothingEnabled = false;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, w, h);
-    await page.render({
-      canvasContext: ctx, viewport: vp,
-      annotationMode: pdfjsLib.AnnotationMode.DISABLE,
-      intent: 'print',
-    }).promise;
-    const pxData = ctx.getImageData(0, 0, w, h).data;
-    for (let k = 0; k < pxData.length; k++) sum[k] += pxData[k];
-  }
-
-  // 平均値をuint8に成形しImageDataとして返す
-  const out = new ImageData(w, h);
-  for (let k = 0; k < out.data.length; k++) out.data[k] = (sum[k] / passes) | 0;
-  return out;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  await page.render({
+    canvasContext: ctx, viewport: vp,
+    annotationMode: pdfjsLib.AnnotationMode.DISABLE,
+    intent: 'print',
+  }).promise;
+  // getImageData 後に canvas を明示的に解放: 対象 canvas を 0x0 にリサイズし GPU ベッファを解放。
+  const imgData = ctx.getImageData(0, 0, w, h);
+  canvas.width = 0; canvas.height = 0;
+  return imgData;
 }
 
 async function renderThumb(doc, pageIndex) {
@@ -187,46 +190,83 @@ async function renderThumb(doc, pageIndex) {
 }
 
 // ─────────────────────────────────────────────────────────
-// CACHE
+// CACHE — バイト上限ベースの LRU
+// エントリ: { data: ImageData, bytes: number }
 // ─────────────────────────────────────────────────────────
+const cacheA = new Map(); // key -> { data, bytes }
+const cacheB = new Map();
+let cacheBytesA = 0;
+let cacheBytesB = 0;
+
+// キャッシュ全クリア（PDFを次のファイルに切り替える時などに使用）
+function clearCacheA() { cacheA.clear(); cacheBytesA = 0; }
+function clearCacheB() { cacheB.clear(); cacheBytesB = 0; }
+
 function cacheGet(map, key) {
   if (!map.has(key)) return null;
-  const v = map.get(key); map.delete(key); map.set(key, v);
-  return v;
+  const entry = map.get(key);
+  // LRU: アクセスしたエントリを最後尾に移動
+  map.delete(key); map.set(key, entry);
+  return entry.data;
 }
-function cacheSet(map, key, val) {
-  map.delete(key); map.set(key, val);
-  if (map.size > MAX_CACHE) map.delete(map.keys().next().value);
+
+function cacheSet(map, key, imgData, bytesRef) {
+  // 既存エントリのバイト数を差し引く
+  if (map.has(key)) {
+    const old = map.get(key);
+    bytesRef.val -= old.bytes;
+    map.delete(key);
+  }
+  const bytes = imgData.width * imgData.height * 4;
+  map.set(key, { data: imgData, bytes });
+  bytesRef.val += bytes;
+
+  // 上限超過時は最古エントリを順次削除
+  while (bytesRef.val > MAX_CACHE_BYTES && map.size > 1) {
+    const oldestKey = map.keys().next().value;
+    const oldest = map.get(oldestKey);
+    bytesRef.val -= oldest.bytes;
+    map.delete(oldestKey);
+  }
 }
+
 async function getOrRenderA(idx, scale = DPR) {
   const key = `${idx}_${scale}`;
-  let c = cacheGet(cacheA, key);
-  if (c) return c;
-  c = await renderPage(state.docA, idx, scale);
-  cacheSet(cacheA, key, c); return c;
+  const hit = cacheGet(cacheA, key);
+  if (hit) return hit;
+  const img = await renderPage(state.docA, idx, scale);
+  const ref = { val: cacheBytesA };
+  cacheSet(cacheA, key, img, ref);
+  cacheBytesA = ref.val;
+  return img;
 }
 async function getOrRenderB(idx, scale = DPR) {
   const key = `${idx}_${scale}`;
-  let c = cacheGet(cacheB, key);
-  if (c) return c;
-  c = await renderPage(state.docB, idx, scale);
-  cacheSet(cacheB, key, c); return c;
+  const hit = cacheGet(cacheB, key);
+  if (hit) return hit;
+  const img = await renderPage(state.docB, idx, scale);
+  const ref = { val: cacheBytesB };
+  cacheSet(cacheB, key, img, ref);
+  cacheBytesB = ref.val;
+  return img;
 }
 
 // ─────────────────────────────────────────────────────────
 // IMAGE PROCESSING HELPERS
 // ─────────────────────────────────────────────────────────
+// キャンバスをモジュールスコープで再利用（毎回 createElement するコストを削減）
+const _offsetCanvas = document.createElement('canvas');
+const _offsetCanvasTmp = document.createElement('canvas');
+
 function applyOffsetAndMatchSize(imgB, imgA) {
   const tw = imgA.width, th = imgA.height;
-  const canvas = document.createElement('canvas');
-  canvas.width = tw; canvas.height = th;
-  const ctx = canvas.getContext('2d', { alpha: false });
+  _offsetCanvas.width = tw; _offsetCanvas.height = th;
+  const ctx = _offsetCanvas.getContext('2d', { alpha: false });
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, tw, th);
-  const tmp = document.createElement('canvas');
-  tmp.width = imgB.width; tmp.height = imgB.height;
-  tmp.getContext('2d').putImageData(imgB, 0, 0);
-  ctx.drawImage(tmp, state.offsetDx, state.offsetDy, imgB.width, imgB.height);
+  _offsetCanvasTmp.width = imgB.width; _offsetCanvasTmp.height = imgB.height;
+  _offsetCanvasTmp.getContext('2d').putImageData(imgB, 0, 0);
+  ctx.drawImage(_offsetCanvasTmp, state.offsetDx, state.offsetDy, imgB.width, imgB.height);
   return ctx.getImageData(0, 0, tw, th);
 }
 
@@ -335,9 +375,10 @@ function applyTransform() {
 }
 
 function fitToView() {
-  // CSSピクセル幅 = canvas物理px / DPR (1倍ズームのPDF幅)
-  const cw = (viewCanvas.width || 1) / DPR;
-  const ch = (viewCanvas.height || 1) / DPR;
+  // CSSピクセル幅 = canvas物理px / 現在のレンダリングスケール (1倍ズームのPDF幅)
+  const rs = state.renderScale || DPR;
+  const cw = (viewCanvas.width || 1) / rs;
+  const ch = (viewCanvas.height || 1) / rs;
   const vw = viewContainer.clientWidth;
   const vh = viewContainer.clientHeight;
   const margin = 40;
@@ -376,10 +417,19 @@ function scheduleZoomRender() {
   if (_zoomRenderTimer) clearTimeout(_zoomRenderTimer);
   _zoomRenderTimer = setTimeout(async () => {
     _zoomRenderTimer = null;
-    const targetScale = DPR * Math.max(state.zoomFactor, 1.0);
+    const targetScale = Math.min(DPR * Math.max(state.zoomFactor, 1.0), MAX_RENDER_SCALE);
     const currentScale = state.renderScale || DPR;
+    // 対象スケールと現在の差が 15% 未満なら再レンダリング不要
     if (Math.abs(targetScale - currentScale) / currentScale < 0.15) return;
-    cacheA.clear(); cacheB.clear();
+    // 旧スケールのキャッシュエントリだけを削除。新スケールのエントリは残す。
+    for (const [k, v] of cacheA) {
+      if (!k.endsWith(`_${currentScale}`)) continue;
+      cacheBytesA -= v.bytes; cacheA.delete(k);
+    }
+    for (const [k, v] of cacheB) {
+      if (!k.endsWith(`_${currentScale}`)) continue;
+      cacheBytesB -= v.bytes; cacheB.delete(k);
+    }
     await renderCurrentView(false);
   }, 300);
 }
@@ -452,6 +502,7 @@ viewContainer.addEventListener('mousedown', e => {
   } else if (mode === 'offset') {
     e.preventDefault();
     state.offsetDragStart = { x: e.clientX, y: e.clientY, dx: state.offsetDx, dy: state.offsetDy };
+    state.isOffsetDragging = true;
   } else if (mode === 'marquee' && viewCanvas.style.display !== 'none') {
     e.preventDefault();
     state.marqueeStart = { x: mouseX, y: mouseY };
@@ -529,7 +580,13 @@ window.addEventListener('mouseup', e => {
     state.panPointer = null;
     viewCanvas.style.cursor = CURSORS[state.activeMode] || 'default';
   }
-  state.offsetDragStart = null;
+  if (state.isOffsetDragging) {
+    state.isOffsetDragging = false;
+    state.offsetDragStart = null;
+    renderCurrentView();
+  } else {
+    state.offsetDragStart = null;
+  }
   if (state.marqueeStart) {
     finishMarqueeZoom(e.clientX - rect.left, e.clientY - rect.top);
   }
@@ -551,12 +608,26 @@ viewContainer.addEventListener('wheel', e => {
 // KEYBOARD SHORTCUTS
 // ─────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
+  // テキスト入力中はショートカットを無視
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+    state.keysDown.add(e.key); updateModeFromKeys(); return;
+  }
+
   state.keysDown.add(e.key);
   updateModeFromKeys();
   if (e.code === 'Space') { e.preventDefault(); return; }
 
   const ctrl = e.ctrlKey || e.metaKey;
   const alt = e.altKey;
+
+  // オフセットモード: 矢印キーで1px(Shift: 10px)微調整
+  if (state.persistentMode === 'offset' && !ctrl && !alt) {
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); state.offsetDx -= step; updateOffsetLabel(); renderCurrentView(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); state.offsetDx += step; updateOffsetLabel(); renderCurrentView(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); state.offsetDy -= step; updateOffsetLabel(); renderCurrentView(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); state.offsetDy += step; updateOffsetLabel(); renderCurrentView(); return; }
+  }
 
   // ページ移動
   if (!ctrl && (e.key === ',' || e.key === 'ArrowUp')) { e.preventDefault(); changePage(-1); return; }
@@ -571,6 +642,32 @@ document.addEventListener('keydown', e => {
   if (!ctrl && !alt && /^[1-5]$/.test(e.key)) {
     const tabMap = ['a', 'b', 'highlight', 'absdiff', 'aori'];
     switchSubTab(tabMap[parseInt(e.key) - 1]); return;
+  }
+
+  // Tab キー: 差分ページ順ジャンプ（Tabで次、Shift+Tabで前）
+  if (e.key === 'Tab' && !ctrl && !alt) {
+    e.preventDefault();
+    jumpToDiff(e.shiftKey ? 'prev' : 'next');
+    return;
+  }
+
+  // F キー: あおり速度サイクル（あおりタブが選択中のみ）
+  if (!ctrl && !alt && (e.key === 'f' || e.key === 'F') && state.activeSubTab === 'aori') {
+    e.preventDefault();
+    state.aoriSpeedIdx = (state.aoriSpeedIdx + 1) % state.aoriSpeeds.length;
+    state.aoriInterval = state.aoriSpeeds[state.aoriSpeedIdx];
+    const labels = ['遅い', '普通', '速い'];
+    aoriSpeedSlider.value = state.aoriInterval;
+    aoriSpeedLabel.textContent = state.aoriInterval + 'ms';
+    setStatus(`あおり速度: ${labels[state.aoriSpeedIdx]} (${state.aoriInterval}ms)`, 2000);
+    if (state.aoriTimer) {
+      clearInterval(state.aoriTimer);
+      state.aoriTimer = setInterval(() => {
+        displayImageData(state.aoriFlag ? state.aoriImgB : state.aoriImgA, state.renderScale);
+        state.aoriFlag = !state.aoriFlag;
+      }, state.aoriInterval);
+    }
+    return;
   }
 
   // モード切替
@@ -610,11 +707,11 @@ async function loadPDF(side, file) {
     if (side === 'a') {
       state.docA = doc; state.nameA = file.name; state.pageA = 0; state.totalA = doc.numPages;
       state.fpA = fp;
-      filenameA.textContent = shortenName(file.name); cacheA.clear();
+      filenameA.textContent = shortenName(file.name); clearCacheA();
     } else {
       state.docB = doc; state.nameB = file.name; state.pageB = 0; state.totalB = doc.numPages;
       state.fpB = fp;
-      filenameB.textContent = shortenName(file.name); cacheB.clear();
+      filenameB.textContent = shortenName(file.name); clearCacheB();
     }
     state.diffPages.clear(); buildThumbList(side); updateNavButtons();
 
@@ -730,6 +827,7 @@ async function startDiffScan() {
     } catch { state.diffPages.add(i); }
     if (token !== _scanToken) return;
     scanProgress.style.width = Math.round((i + 1) / total * 100) + '%';
+    setStatus(`スキャン中... ${i + 1} / ${total}  (差分: ${state.diffPages.size}件)`);
     await new Promise(r => setTimeout(r, 0));
   }
   if (token !== _scanToken) return;
@@ -737,20 +835,19 @@ async function startDiffScan() {
   setStatus(`${state.diffPages.size}ページに差分があります。`, 5000);
   btnDiffList.disabled = false;
   refreshDiffBadges(); rebuildDiffSummaryPanel();
+  updateDiffCountBadge();
 }
 function applyOffsetAndMatchSizeSimple(imgA, imgB) {
   const dx = Math.round(state.offsetDx * DPR);
   const dy = Math.round(state.offsetDy * DPR);
   if (imgA.width === imgB.width && imgA.height === imgB.height && dx === 0 && dy === 0) return imgB;
-  const c = document.createElement('canvas');
-  c.width = imgA.width; c.height = imgA.height;
-  const ctx = c.getContext('2d', { alpha: false });
+  _offsetCanvas.width = imgA.width; _offsetCanvas.height = imgA.height;
+  const ctx = _offsetCanvas.getContext('2d', { alpha: false });
   ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-  const tmp = document.createElement('canvas');
-  tmp.width = imgB.width; tmp.height = imgB.height;
-  tmp.getContext('2d').putImageData(imgB, 0, 0);
-  ctx.drawImage(tmp, dx, dy, imgB.width, imgB.height);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, _offsetCanvas.width, _offsetCanvas.height);
+  _offsetCanvasTmp.width = imgB.width; _offsetCanvasTmp.height = imgB.height;
+  _offsetCanvasTmp.getContext('2d').putImageData(imgB, 0, 0);
+  ctx.drawImage(_offsetCanvasTmp, dx, dy, imgB.width, imgB.height);
   return ctx.getImageData(0, 0, imgA.width, imgA.height);
 }
 
@@ -762,7 +859,7 @@ async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
   const tab = state.activeSubTab;
 
-  const visualScale = DPR * Math.max(state.zoomFactor, 1.0);
+  const visualScale = Math.min(DPR * Math.max(state.zoomFactor, 1.0), MAX_RENDER_SCALE);
 
   stopAori();
   if (tab === 'aori') aoriControls.style.display = 'flex';
@@ -793,7 +890,9 @@ async function renderCurrentView(forceFit = false) {
 
   let res;
   switch (tab) {
-    case 'highlight': res = computeHighlightDiff(imgA, imgB); break;
+    case 'highlight':
+      res = state.isOffsetDragging ? computeAbsDiff(imgA, imgB) : computeHighlightDiff(imgA, imgB);
+      break;
     case 'absdiff': res = computeAbsDiff(imgA, imgB); break;
     case 'aori':
       displayImageData(imgA, visualScale);
@@ -840,13 +939,22 @@ function changePage(delta) {
   let changed = false;
   if (state.docA && state.pageA + delta >= 0 && state.pageA + delta < state.totalA) { state.pageA += delta; changed = true; }
   if (state.docB && state.pageB + delta >= 0 && state.pageB + delta < state.totalB) { state.pageB += delta; changed = true; }
-  if (changed) { syncPageIndex(); renderCurrentView(true); }
+  if (!changed) return;
+  syncPageIndex();
+  // あおり継続: アクティブなあおりタイマーを維持したまま新ページをレンダリング
+  if (state.activeSubTab === 'aori' && state.aoriTimer) {
+    clearInterval(state.aoriTimer);
+    state.aoriTimer = null;
+    renderCurrentView(false); // startAori を呼び出す（あおりを再起動）
+  } else {
+    renderCurrentView(false);
+  }
 }
 function goToPage(idx) {
   let changed = false;
   if (state.docA && idx >= 0 && idx < state.totalA) { state.pageA = idx; changed = true; }
   if (state.docB && idx >= 0 && idx < state.totalB) { state.pageB = idx; changed = true; }
-  if (changed) { syncPageIndex(); renderCurrentView(true); }
+  if (changed) { syncPageIndex(); renderCurrentView(false); }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -862,6 +970,29 @@ function updateOffsetLabel() {
 }
 
 // ─────────────────────────────────────────────────────────
+// DIFF COUNT BADGE
+// ─────────────────────────────────────────────────────────
+function updateDiffCountBadge() {
+  const n = state.diffPages.size;
+  // ツールバーの旧バッジ
+  const oldBadge = $('diff-count-badge');
+  if (oldBadge) {
+    oldBadge.textContent = n > 0 ? `⚡${n}` : '';
+    oldBadge.style.display = n > 0 ? 'inline-block' : 'none';
+  }
+  // 差分パネルヘッダーバッジ
+  const panelBadge = $('diff-panel-badge');
+  if (panelBadge) {
+    if (n === 0) {
+      panelBadge.style.display = 'none';
+    } else {
+      panelBadge.textContent = `${n}件`;
+      panelBadge.style.display = 'inline-block';
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // DIFF SUMMARY PANEL
 // ─────────────────────────────────────────────────────────
 function rebuildDiffSummaryPanel() {
@@ -869,11 +1000,20 @@ function rebuildDiffSummaryPanel() {
   diffList.innerHTML = '';
   for (let i = 0; i < total; i++) {
     const hasDiff = state.diffPages.has(i);
+    // フィルターON時は差分ページのみ表示
+    if (state.diffFilterOnly && !hasDiff) continue;
     const div = document.createElement('div');
     div.className = `diff-summary-item${hasDiff ? ' has-diff' : ''}${i === state.pageA ? ' current' : ''}`;
     div.textContent = (hasDiff ? '⚡️ ' : '') + `Page ${i + 1}`;
     div.addEventListener('click', () => { goToPage(i); rebuildDiffSummaryPanel(); });
     diffList.appendChild(div);
+  }
+  // フィルターボタンの外観を状態に合わせる
+  const fb = $('btn-diff-filter');
+  if (fb) {
+    fb.textContent = state.diffFilterOnly ? '全て表示' : '絞り込み';
+    fb.style.background = state.diffFilterOnly ? 'var(--diff-badge)' : 'none';
+    fb.style.color = state.diffFilterOnly ? '#000' : 'var(--text-muted)';
   }
 }
 function jumpToDiff(dir) {
@@ -935,11 +1075,54 @@ if (btnMarqueeZoom) btnMarqueeZoom.addEventListener('click', () => setPersistent
 
 $('btn-prev').addEventListener('click', () => changePage(-1));
 $('btn-next').addEventListener('click', () => changePage(1));
+
+// ページ直接入力: page-info クリック → インライン input に切り替え
+pageInfo.addEventListener('click', () => {
+  if (!state.docA && !state.docB) return;
+  const currentPage = state.docA ? state.pageA + 1 : state.pageB + 1;
+  const totalMax = Math.max(state.totalA || 0, state.totalB || 0);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = 1;
+  input.max = totalMax;
+  input.value = currentPage;
+  input.style.cssText = [
+    'width:80px', 'text-align:center', 'font-size:inherit',
+    'font-family:inherit', 'background:var(--bg-panel)',
+    'color:var(--text-primary)', 'border:1px solid var(--accent)',
+    'border-radius:4px', 'padding:2px 6px', 'outline:none',
+  ].join(';');
+  pageInfo.replaceWith(input);
+  input.select();
+
+  const commit = () => {
+    const v = parseInt(input.value);
+    input.replaceWith(pageInfo);
+    if (!isNaN(v) && v >= 1 && v <= totalMax) goToPage(v - 1);
+    else updatePageInfo();
+  };
+  const cancel = () => { input.replaceWith(pageInfo); updatePageInfo(); };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    e.stopPropagation();
+  });
+  input.addEventListener('blur', commit);
+});
 $('btn-export').addEventListener('click', exportCurrentView);
 $('btn-diff-list').addEventListener('click', toggleDiffPanel);
 $('btn-close-diff-panel').addEventListener('click', () => diffPanel.classList.remove('visible'));
 $('btn-diff-prev').addEventListener('click', () => jumpToDiff('prev'));
 $('btn-diff-next').addEventListener('click', () => jumpToDiff('next'));
+// 差分フィルタートグル
+const btnDiffFilter = $('btn-diff-filter');
+if (btnDiffFilter) {
+  btnDiffFilter.addEventListener('click', () => {
+    state.diffFilterOnly = !state.diffFilterOnly;
+    rebuildDiffSummaryPanel();
+  });
+}
 
 if (zoomCombo) {
   zoomCombo.addEventListener('change', () => {
