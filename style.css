@@ -27,7 +27,8 @@
   --accent: #3b82f6;
   --accent-hover: #2563eb;
   --danger: #ef4444;
-  --diff-badge: #f59e0b;
+  --diff-badge-bg: #ea580c;
+  --diff-badge-text: #ffffff;
 
   --scrollbar-thumb: rgba(0, 0, 0, 0.25);
   --scrollbar-track: transparent;
@@ -67,7 +68,8 @@
     --accent: #60a5fa;
     --accent-hover: #93c5fd;
     --danger: #f87171;
-    --diff-badge: #fbbf24;
+    --diff-badge-bg: #f97316;
+    --diff-badge-text: #000000;
 
     --scrollbar-thumb: rgba(255, 255, 255, 0.2);
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
@@ -306,9 +308,30 @@ body {
   color: var(--text-secondary);
 }
 
-.thumb-diff-badge {
-  font-size: 11px;
-  margin-left: 2px;
+#diff-count-badge,
+#diff-panel-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--diff-badge-bg);
+  color: var(--diff-badge-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  line-height: normal;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.diff-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--diff-badge-bg);
+  margin-right: 4px;
+  vertical-align: middle;
 }
 
 /* ---------- Content Area ---------- */
@@ -890,4 +913,6 @@ kbd {
 
 #diff-panel-badge {
   animation: badge-pop 0.3s ease-out;
+  margin-left: 6px;
+  vertical-align: middle;
 }
