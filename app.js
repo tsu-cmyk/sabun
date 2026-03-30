@@ -8,7 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────────────────────
-const DIFF_THRESHOLD = 10;
+const DIFF_THRESHOLD = 5;
 const HIGHLIGHT_COLOR = [255, 75, 0];
 const THUMB_SCALE = 0.12;
 // キャッシュの合計バイト上限 (200 MB)
@@ -821,7 +821,7 @@ async function startDiffScan() {
       if (token !== _scanToken) return;
       if (Math.abs(ia.width - ib.width) > 1 || Math.abs(ia.height - ib.height) > 1) {
         state.diffPages.add(i);
-      } else if (hasDiff(ia, ib, 11, 1)) {
+      } else if (hasDiff(ia, ib, 4, 0)) {
         state.diffPages.add(i);
       }
     } catch { state.diffPages.add(i); }
