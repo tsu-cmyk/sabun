@@ -749,7 +749,7 @@ function buildThumbList(side) {
       <div class="thumb-img-placeholder" id="th-${side}-${i}">📄</div>
       <div class="thumb-info">
         <div class="thumb-page-num">
-          <span class="thumb-diff-badge" id="badge-${side}-${i}">${state.diffPages.has(i) ? '⚡️' : ''}</span>
+          <span class="diff-dot" id="badge-${side}-${i}" style="display:${state.diffPages.has(i) ? 'inline-block' : 'none'}"></span>
           Page ${i + 1}
         </div>
       </div>`;
@@ -788,7 +788,7 @@ function refreshDiffBadges() {
     const total = side === 'a' ? state.totalA : state.totalB;
     for (let i = 0; i < total; i++) {
       const b = document.getElementById(`badge-${side}-${i}`);
-      if (b) b.textContent = state.diffPages.has(i) ? '⚡️' : '';
+      if (b) b.style.display = state.diffPages.has(i) ? 'inline-block' : 'none';
     }
   });
 }
@@ -977,8 +977,8 @@ function updateDiffCountBadge() {
   // ツールバーの旧バッジ
   const oldBadge = $('diff-count-badge');
   if (oldBadge) {
-    oldBadge.textContent = n > 0 ? `⚡${n}` : '';
-    oldBadge.style.display = n > 0 ? 'inline-block' : 'none';
+    oldBadge.textContent = n > 0 ? `${n}件` : '';
+    oldBadge.style.display = n > 0 ? 'inline-flex' : 'none';
   }
   // 差分パネルヘッダーバッジ
   const panelBadge = $('diff-panel-badge');
@@ -1004,7 +1004,7 @@ function rebuildDiffSummaryPanel() {
     if (state.diffFilterOnly && !hasDiff) continue;
     const div = document.createElement('div');
     div.className = `diff-summary-item${hasDiff ? ' has-diff' : ''}${i === state.pageA ? ' current' : ''}`;
-    div.textContent = (hasDiff ? '⚡️ ' : '') + `Page ${i + 1}`;
+    div.innerHTML = (hasDiff ? '<span class="diff-dot"></span>' : '') + `Page ${i + 1}`;
     div.addEventListener('click', () => { goToPage(i); rebuildDiffSummaryPanel(); });
     diffList.appendChild(div);
   }
