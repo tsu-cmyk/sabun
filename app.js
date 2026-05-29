@@ -73,6 +73,9 @@ const state = {
 
   // 差分フィルター
   diffFilterOnly: false,
+  // 注釈表示フラグ（A/B）
+  showAnnA: false,
+  showAnnB: false,
 };
 
 
@@ -112,6 +115,23 @@ const aoriSpeedLabel = $('aori-speed-label');
 const btnHelp = $('btn-help');
 const helpModal = $('help-modal');
 const btnCloseHelp = $('btn-close-help');
+const toggleAnnA = $('toggle-annotations-a');
+const toggleAnnB = $('toggle-annotations-b');
+
+if (toggleAnnA) {
+  toggleAnnA.addEventListener('change', () => {
+    state.showAnnA = !!toggleAnnA.checked;
+    setStatus(`A注釈: ${state.showAnnA ? '表示' : '非表示'}`, 1500);
+    renderCurrentView(true);
+  });
+}
+if (toggleAnnB) {
+  toggleAnnB.addEventListener('change', () => {
+    state.showAnnB = !!toggleAnnB.checked;
+    setStatus(`B注釈: ${state.showAnnB ? '表示' : '非表示'}`, 1500);
+    renderCurrentView(true);
+  });
+}
 
 // ─────────────────────────────────────────────────────────
 // STATUS
@@ -140,10 +160,13 @@ async function renderPage(doc, pageIndex, scale = DPR) {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
 
+  // annotationMode は呼び出し側が制御したいので options で切替可能。
+  // デフォルトでは注釈を無効にする。
+  const annotationMode = (arguments.length >= 4 && arguments[3] && arguments[3].annotations) ? pdfjsLib.AnnotationMode.ENABLE : pdfjsLib.AnnotationMode.DISABLE;
   await page.render({
     canvasContext: ctx,
     viewport: vp,
-    annotationMode: pdfjsLib.AnnotationMode.DISABLE,
+    annotationMode,
     intent: 'print',
   }).promise;
 
@@ -231,20 +254,22 @@ function cacheSet(map, key, imgData, bytesRef) {
 }
 
 async function getOrRenderA(idx, scale = DPR) {
-  const key = `${idx}_${scale}`;
+  const ann = state.showAnnA ? 1 : 0;
+  const key = `${idx}_${scale}_${ann}`;
   const hit = cacheGet(cacheA, key);
   if (hit) return hit;
-  const img = await renderPage(state.docA, idx, scale);
+  const img = await renderPage(state.docA, idx, scale, { annotations: state.showAnnA });
   const ref = { val: cacheBytesA };
   cacheSet(cacheA, key, img, ref);
   cacheBytesA = ref.val;
   return img;
 }
 async function getOrRenderB(idx, scale = DPR) {
-  const key = `${idx}_${scale}`;
+  const ann = state.showAnnB ? 1 : 0;
+  const key = `${idx}_${scale}_${ann}`;
   const hit = cacheGet(cacheB, key);
   if (hit) return hit;
-  const img = await renderPage(state.docB, idx, scale);
+  const img = await renderPage(state.docB, idx, scale, { annotations: state.showAnnB });
   const ref = { val: cacheBytesB };
   cacheSet(cacheB, key, img, ref);
   cacheBytesB = ref.val;
