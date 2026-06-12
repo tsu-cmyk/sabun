@@ -1180,8 +1180,8 @@ kbd {
 
 /* テキストタブでは右側に差分テキストを並列表示 */
 #text-view {
-  flex: 0 0 44%;
-  max-width: 44%;
+  flex: 0 0 25%;
+  max-width: 25%;
   border-left: 1px solid var(--border);
 }
 
