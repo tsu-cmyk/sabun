@@ -8,130 +8,124 @@
   <meta name="description" content="PDFの差分を高精度で比較するPWAツール">
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="style.css">
-  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#e8e8e8">
-  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2d2d2d">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f9">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#131a24">
+  <script>
+    try {
+      const q = new URLSearchParams(location.search).get('theme');
+      const t = q || localStorage.getItem('sabun_theme') ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.dataset.theme = t;
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  </script>
 </head>
 
 <body>
   <div id="app">
 
-    <!-- ===================== TOOLBAR ===================== -->
-    <div id="toolbar">
-      <span style="font-weight:700;font-size:14px;letter-spacing:0.05em;margin-right:4px;">SABUN</span>
-      <div class="toolbar-sep"></div>
+    <!-- ===================== TOP BAR ===================== -->
+    <header id="toolbar" role="toolbar" aria-label="メインツールバー">
+      <span class="brand">SABUN<span class="brand-sub">PDF比較・検版</span></span>
 
-      <button class="toolbar-btn" id="btn-open-a" title="A側PDFを開く (Ctrl+A)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
-          <line x1="12" y1="8" x2="12" y2="16" />
-          <line x1="8" y1="12" x2="16" y2="12" />
-        </svg>
-        A を開く
+      <div class="filepair" role="group" aria-label="比較ファイル">
+        <button class="chip" id="btn-open-a" title="A側PDFを開く (Ctrl+A) — 左のA欄へのドロップでも読込できます">
+          <span class="chip-tag tag-a">A</span><span class="chip-name" id="open-name-a">PDFを開く</span>
+        </button>
+        <button class="chip" id="btn-open-b" title="B側PDFを開く (Ctrl+B) — 左のB欄へのドロップでも読込できます">
+          <span class="chip-tag tag-b">B</span><span class="chip-name" id="open-name-b">PDFを開く</span>
+        </button>
+      </div>
+
+      <div class="top-sep"></div>
+
+      <button class="tbtn" id="btn-diff-list" title="差分ページ一覧パネルの表示/非表示 (8 / Ctrl+L)" disabled>
+        差分一覧<span id="diff-count-badge" style="display:none;" aria-live="polite"></span>
       </button>
-      <button class="toolbar-btn" id="btn-open-b" title="B側PDFを開く (Ctrl+B)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
-          <line x1="12" y1="8" x2="12" y2="16" />
-          <line x1="8" y1="12" x2="16" y2="12" />
-        </svg>
-        B を開く
-      </button>
+      <button class="tbtn" id="btn-text-panel" title="テキスト差分パネルの表示/非表示 (7)" aria-pressed="false">テキスト差分</button>
+      <button class="tbtn" id="btn-annot" title="注釈ツールバーの表示/非表示" aria-expanded="false">注釈</button>
 
-      <div class="toolbar-sep"></div>
+      <span class="grow"></span>
 
-      <button class="toolbar-btn" id="btn-diff-list" title="差分一覧 (Ctrl+L)" disabled>
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <circle cx="11" cy="11" r="8" />
-          <line x1="21" y1="21" x2="16.65" y2="16.65" />
-        </svg>
-        差分一覧
-      </button>
-      <span id="diff-count-badge" style="display:none;"></span>
-
-      <div class="toolbar-sep"></div>
-
-      <button class="toolbar-btn" id="btn-zoom-out" title="ズームアウト (Ctrl+-)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <circle cx="11" cy="11" r="8" />
-          <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          <line x1="8" y1="11" x2="14" y2="11" />
-        </svg>
-      </button>
-      <select id="zoom-combo" title="ズーム倍率"
-        style="font-family:inherit;font-size:12px;background:var(--bg-panel);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:3px 4px;cursor:pointer;">
-        <option>25%</option>
-        <option>50%</option>
-        <option>75%</option>
-        <option selected>100%</option>
-        <option>150%</option>
-        <option>200%</option>
-        <option>300%</option>
-        <option>400%</option>
+      <select id="quality-select" class="tsel" title="レンダリング画質 — ズームしても差分結果は変わりません" aria-label="レンダリング画質">
+        <option value="std">画質: 標準</option>
+        <option value="high" selected>画質: 高</option>
       </select>
-      <span id="zoom-label" class="toolbar-label" style="display:none;">100%</span>
-      <button class="toolbar-btn" id="btn-zoom-in" title="ズームイン (Ctrl++)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <circle cx="11" cy="11" r="8" />
-          <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          <line x1="11" y1="8" x2="11" y2="14" />
-          <line x1="8" y1="11" x2="14" y2="11" />
-        </svg>
-      </button>
-      <button class="toolbar-btn" id="btn-marquee-zoom" title="矩形ズーム (MまたはShift+ドラッグ)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4" />
-          <circle cx="12" cy="12" r="3" />
-        </svg>
-      </button>
-      <button class="toolbar-btn" id="btn-fit" title="ウィンドウに合わせる (Ctrl+0)">フィット</button>
+      <button class="tbtn" id="btn-report" title="検版レポートを生成 — 全差分ページをHTMLにまとめて保存 (印刷でPDF化)">レポート</button>
+      <button class="tbtn" id="btn-export" title="現在のビューを保存 (Ctrl+S) — テキストパネル表示中はHTMLレポート">保存</button>
+      <button class="tbtn icon" id="btn-theme" title="テーマ切替 (ライト/ダーク)" aria-label="テーマ切替">◐</button>
+      <button class="tbtn icon" id="btn-help" title="ヘルプ" aria-label="ヘルプ">?</button>
+
+      <input type="file" id="file-input-a" accept=".pdf" style="display:none" aria-hidden="true">
+      <input type="file" id="file-input-b" accept=".pdf" style="display:none" aria-hidden="true">
+      <span id="zoom-label" hidden></span>
+    </header>
+
+    <!-- ===================== ANNOTATION BAR ===================== -->
+    <div id="annot-bar" role="toolbar" aria-label="注釈ツールバー" hidden>
+      <span class="annot-bar-label">注釈:</span>
+      <label class="annot-style-label annot-target-label" title="注釈を描き込む対象PDF (手描き・自動付与の両方に適用)">対象
+        <select id="annot-target" aria-label="注釈の対象PDF">
+          <option value="b" selected>B</option>
+          <option value="a">A</option>
+          <option value="both">A+B</option>
+        </select>
+      </label>
+      <label class="annot-style-label" title="注釈の記入者名 (PDF注釈の作成者として記録されます)">記入者
+        <input type="text" id="annot-author" value="ADP" maxlength="32" aria-label="注釈の記入者名"
+          style="width:64px;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);">
+      </label>
+      <div class="toolbar-sep"></div>
+      <button class="toolbar-btn annot-tool" data-annot-tool="select" aria-pressed="false" title="注釈を選択/移動/サイズ変更 (V)">選択</button>
+      <button class="toolbar-btn annot-tool" data-annot-tool="rect" aria-pressed="false" title="矩形を描く (R)">▭ 矩形</button>
+      <button class="toolbar-btn annot-tool" data-annot-tool="ellipse" aria-pressed="false" title="楕円を描く (O)">◯ 楕円</button>
+      <button class="toolbar-btn annot-tool" data-annot-tool="line" aria-pressed="false" title="線を描く (L)">／ 線</button>
+      <button class="toolbar-btn annot-tool" data-annot-tool="arrow" aria-pressed="false" title="矢印を描く (A)">↗ 矢印</button>
+      <label class="annot-style-label" title="描画後もツールを維持 (OFFなら描画後に選択ツールへ戻る — Acrobat風)">
+        <input type="checkbox" id="annot-keep-tool"> 維持
+      </label>
 
       <div class="toolbar-sep"></div>
 
-      <button class="toolbar-btn" id="btn-drag-mode" title="パンモード (Ctrl+H / Space)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path
-            d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v5M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v6M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8" />
-          <path d="M6 14a2 2 0 0 1 2-2 2 2 0 0 1 2 2v2a5 5 0 0 0 5 5h1a5 5 0 0 0 5-5V6" />
-        </svg>
-        パン
-      </button>
-      <button class="toolbar-btn" id="btn-offset-mode" title="オフセット調整モード — BをA上でドラッグ移動">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <polyline points="5 9 2 12 5 15" />
-          <polyline points="9 5 12 2 15 5" />
-          <line x1="2" y1="12" x2="22" y2="12" />
-          <line x1="12" y1="2" x2="12" y2="22" />
-          <polyline points="19 9 22 12 19 15" />
-          <polyline points="9 19 12 22 15 19" />
-        </svg>
-        オフセット
-      </button>
-      <button class="toolbar-btn" id="btn-offset-reset" title="オフセットをリセット"
-        style="font-size:11px;padding:3px 8px;">リセット</button>
-      <span id="offset-label" style="font-size:10px;color:var(--text-muted);min-width:80px;">dx:0 dy:0</span>
+      <!-- スタイル (新規作成と選択中の注釈に適用) -->
+      <label class="annot-style-label" title="線の色">線
+        <input type="color" id="annot-stroke" value="#ff2d2d" aria-label="線の色">
+      </label>
+      <label class="annot-style-label" title="塗りつぶしの有無と色">
+        <input type="checkbox" id="annot-fill-enable" aria-label="塗りを有効化"> 塗り
+        <input type="color" id="annot-fill" value="#ffe14d" disabled aria-label="塗りの色">
+      </label>
+      <label class="annot-style-label" title="線幅 (pt)">線幅
+        <select id="annot-width" aria-label="線幅">
+          <option value="0.5">0.5pt</option>
+          <option value="1" selected>1pt</option>
+          <option value="2">2pt</option>
+          <option value="3">3pt</option>
+          <option value="5">5pt</option>
+        </select>
+      </label>
+      <label class="annot-style-label" title="線種">線種
+        <select id="annot-dash" aria-label="線種">
+          <option value="solid" selected>実線</option>
+          <option value="dashed">破線</option>
+          <option value="dotted">点線</option>
+        </select>
+      </label>
 
       <div class="toolbar-sep"></div>
 
-      <button class="toolbar-btn" id="btn-export" title="現在のビューを保存 (Ctrl+S)">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
-        </svg>
-        保存
-      </button>
+      <!-- 差分領域の自動注釈化 -->
+      <button class="toolbar-btn" id="btn-annot-regions-page" title="このページの差分領域に矩形注釈を一括付与(対象とスタイル設定が適用されます)">差分領域を注釈化</button>
+      <button class="toolbar-btn" id="btn-annot-regions-all" title="全差分ページの差分領域に矩形注釈を一括付与">全差分ページ</button>
 
       <div class="toolbar-sep"></div>
-      <button class="toolbar-btn" id="btn-help" title="ヘルプ">
-        <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
-          <path
-            d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26A1.98 1.98 0 0 0 14 9c0-1.1-.9-2-2-2s-2 .9-2 2H8a4 4 0 0 1 8 0c0 .88-.36 1.68-.93 2.25z" />
-        </svg>
-      </button>
-
-      <!-- hidden file inputs -->
-      <input type="file" id="file-input-a" accept=".pdf" style="display:none">
-      <input type="file" id="file-input-b" accept=".pdf" style="display:none">
+      <button class="toolbar-btn" id="btn-annot-list" title="注釈一覧パネルの表示/非表示 — 全ページの注釈にジャンプ/削除" aria-pressed="false">一覧</button>
+      <button class="toolbar-btn" id="btn-annot-delete" title="選択中の注釈を削除 (Delete)">削除</button>
+      <button class="toolbar-btn" id="btn-annot-clear" title="このページの注釈をA/B両方とも全て削除">ページ内クリア</button>
+      <button class="toolbar-btn" id="btn-annot-clear-all" title="全ページの注釈をすべて削除 (確認あり)">全クリア</button>
+      <div class="toolbar-sep"></div>
+      <button class="toolbar-btn" id="btn-annot-savepdf" title="「対象」のPDFに注釈を埋め込んで保存 — Acrobatで長方形/円/線/テキストとして編集できます">注釈入りPDF保存</button>
+      <button class="toolbar-btn" id="btn-annot-xfdf" title="「対象」のPDFの注釈をAcrobat互換XFDFとして書き出し (Acrobat: コメント > 読み込み)">XFDF書き出し</button>
+      <span class="annot-hint">注釈は「対象」のPDFへ。保存も対象のPDFのみ。差分判定には影響しません。</span>
     </div>
 
     <!-- ===================== MAIN BODY ===================== -->
@@ -142,16 +136,16 @@
         <!-- A panel -->
         <div class="sidebar-pane" style="flex:1;min-height:0;">
           <div class="sidebar-header">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent)" aria-hidden="true">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
             </svg>
             A ページ
           </div>
           <div class="sidebar-filename" id="sidebar-filename-a">（未ロード）</div>
           <div class="sidebar-controls" style="padding:4px 10px;">
-            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-a"> コメントを表示</label>
+            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-a"> PDF内の注釈を表示</label>
           </div>
-          <div class="thumb-list" id="thumb-list-a"></div>
+          <div class="thumb-list" id="thumb-list-a" role="list" aria-label="Aのページ一覧"></div>
         </div>
 
         <div class="sidebar-divider"></div>
@@ -159,16 +153,16 @@
         <!-- B panel -->
         <div class="sidebar-pane" style="flex:1;min-height:0;">
           <div class="sidebar-header">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="#f59e0b">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="#f59e0b" aria-hidden="true">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
             </svg>
             B ページ
           </div>
           <div class="sidebar-filename" id="sidebar-filename-b">（未ロード）</div>
           <div class="sidebar-controls" style="padding:4px 10px;">
-            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-b"> コメントを表示</label>
+            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-b"> PDF内の注釈を表示</label>
           </div>
-          <div class="thumb-list" id="thumb-list-b"></div>
+          <div class="thumb-list" id="thumb-list-b" role="list" aria-label="Bのページ一覧"></div>
         </div>
       </div>
 
@@ -177,115 +171,237 @@
         <!-- IMAGE TAB -->
         <div class="tab-panel active" id="main-tab-image">
           <!-- Sub tabs -->
-          <div class="tab-bar" id="image-sub-tab-bar">
-            <button class="tab-btn active" data-sub-tab="a">Aビュー <kbd>1</kbd></button>
-            <button class="tab-btn" data-sub-tab="b">Bビュー <kbd>2</kbd></button>
-            <button class="tab-btn" data-sub-tab="highlight">ハイライト差分 <kbd>3</kbd></button>
-            <button class="tab-btn" data-sub-tab="absdiff">絶対値差 <kbd>4</kbd></button>
-            <button class="tab-btn" data-sub-tab="aori">あおり表示 <kbd>5</kbd></button>
+          <div class="tab-bar" id="image-sub-tab-bar" role="tablist" aria-label="比較モード">
+            <button class="tab-btn active" role="tab" aria-selected="true" data-sub-tab="a">A <kbd>1</kbd></button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="b">B <kbd>2</kbd></button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="highlight">ハイライト <kbd>3</kbd></button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="aori">あおり <kbd>4</kbd></button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="absdiff">絶対値差 <kbd>5</kbd></button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="split">スプリット <kbd>6</kbd></button>
 
-            <!-- Aori speed control (visible only when aori is active) -->
-            <div id="aori-controls"
-              style="display:none; margin-left:12px; margin-bottom:5px; align-items:center; gap:10px; height:20px;">
-              <span style="font-size:10px; color:var(--text-muted); line-height:1;">あおり速度:</span>
+            <!-- Highlight controls -->
+            <div id="highlight-controls" class="tab-controls">
+              <label>感度
+                <select id="sens-select" title="差分検出の感度" aria-label="差分検出の感度">
+                  <option value="high" selected>高</option>
+                  <option value="mid">標準</option>
+                  <option value="low">低</option>
+                </select>
+              </label>
+              <label title="差分画素を太く強調表示"><input type="checkbox" id="toggle-emphasize" checked> 強調</label>
+              <label title="差分領域の枠を表示"><input type="checkbox" id="toggle-regions" checked> 領域枠</label>
+              <span class="hl-legend" title="橙: B側のみ(追加) / 水色: A側のみ(削除)">
+                <i class="sw sw-orange" aria-hidden="true"></i>追加 <i class="sw sw-cyan" aria-hidden="true"></i>削除
+              </span>
+              <span id="diff-pixel-label" aria-live="polite"></span>
+            </div>
+
+            <!-- Aori speed control -->
+            <div id="aori-controls" class="tab-controls">
+              <span>あおり速度:</span>
               <input type="range" id="aori-speed-slider" min="100" max="600" value="300" step="10"
-                style="width:70px; margin:0; cursor:pointer;">
-              <span id="aori-speed-label"
-                style="font-size:10px; color:var(--text-muted); width:50px; line-height:1;">300ms</span>
+                style="width:70px;" aria-label="あおり速度">
+              <span id="aori-speed-label" style="width:46px;">300ms</span>
+            </div>
+
+            <!-- Split hint -->
+            <div id="split-controls" class="tab-controls">
+              <span>ドラッグで境界を移動（左: A / 右: B）</span>
+            </div>
+
+
+          </div>
+
+          <!-- View row: canvas + (text diff) -->
+          <div id="view-row">
+            <div class="view-container" id="view-container">
+              <canvas id="view-canvas" class="view-canvas" style="display:none;" aria-label="比較ビュー"></canvas>
+              <canvas id="annot-canvas" class="view-canvas annot-canvas" style="display:none;" aria-hidden="true"></canvas>
+              <div id="marquee-box" class="marquee-box" aria-hidden="true"></div>
+              <div id="locate-marker" aria-hidden="true"></div>
+              <div class="view-placeholder" id="view-placeholder">
+                <svg width="64" height="64" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24"
+                  opacity="0.3" aria-hidden="true">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <p>A / B のPDFをドロップまたはボタンで開いてください</p>
+                <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
+              </div>
+              <div id="busy-indicator" role="status" aria-label="計算中"><div class="spinner"></div><span>計算中…</span></div>
+              <div id="scan-progress" aria-hidden="true"></div>
+
+              <!-- フローティングHUD: ページ / ズーム / ツール -->
+              <div id="viewer-hud" style="display:none;">
+                <div class="hud-group" role="group" aria-label="ページ">
+                  <button class="hud-btn" id="btn-prev" title="前のページ (↑)" disabled aria-label="前のページ">‹</button>
+                  <span id="page-info" title="クリックしてページ番号を入力" role="button" tabindex="0">—</span>
+                  <button class="hud-btn" id="btn-next" title="次のページ (↓)" disabled aria-label="次のページ">›</button>
+                </div>
+                <span class="hud-sep"></span>
+                <div class="hud-group" role="group" aria-label="ズーム">
+                  <button class="hud-btn" id="btn-zoom-out" title="ズームアウト (Ctrl+-)" aria-label="ズームアウト">−</button>
+                  <input id="zoom-combo" type="text" list="zoom-presets" value="100%" title="ズーム倍率 (数値入力可)" aria-label="ズーム倍率" inputmode="numeric">
+                  <datalist id="zoom-presets">
+                    <option value="25%"></option><option value="50%"></option><option value="75%"></option>
+                    <option value="100%"></option><option value="150%"></option><option value="200%"></option>
+                    <option value="300%"></option><option value="400%"></option>
+                  </datalist>
+                  <button class="hud-btn" id="btn-zoom-in" title="ズームイン (Ctrl++)" aria-label="ズームイン">＋</button>
+                  <button class="hud-text" id="btn-fit" title="画面にフィット (Ctrl+0)">フィット</button>
+                </div>
+                <span class="hud-sep"></span>
+                <div class="hud-group" role="group" aria-label="ツール">
+                  <button class="hud-text" id="btn-drag-mode" title="パンモード — ドラッグで紙面を移動 (Ctrl+H / Space)" aria-pressed="false">パン</button>
+                  <button class="hud-text" id="btn-marquee-zoom" title="矩形ズーム — 囲った範囲を拡大 (M / Shift+ドラッグ)" aria-pressed="false">矩形ズーム</button>
+                </div>
+                <span class="hud-sep"></span>
+                <div class="hud-group hud-offset" role="group" aria-label="オフセット調整">
+                  <span class="hud-cap">オフセット</span>
+                  <button class="hud-text" id="btn-offset-mode" title="調整モード — BをA上でドラッグして位置を合わせる (矢印キーで1px)" aria-pressed="false">調整</button>
+                  <button class="hud-text" id="btn-auto-align" title="自動位置合わせ — ズレを自動推定して補正 (もう一度押すと元に戻す)" aria-pressed="false">自動</button>
+                  <button class="hud-text" id="btn-offset-reset" title="オフセットを 0,0 に戻す">リセット</button>
+                  <span id="offset-label" title="現在のオフセット量 (pt)">dx:0 dy:0</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Annotation list panel (ドック型サイドパネル) -->
+            <div id="annot-list-panel" aria-label="注釈一覧パネル" role="complementary">
+              <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
+              <div class="text-view-header">
+                <strong class="text-view-title">注釈一覧</strong>
+                <span id="annot-list-count" class="panel-count"></span>
+                <span style="flex:1;"></span>
+                <button class="panel-close-btn" id="btn-close-annot-list" aria-label="閉じる" title="閉じる">✕</button>
+              </div>
+              <div class="text-view-hint">クリックで該当箇所へジャンプ / ✕で削除</div>
+              <div id="annot-list" role="list"></div>
+            </div>
+
+            <!-- Diff pages panel (ドック型サイドパネル) -->
+            <div id="diff-summary-panel" aria-label="差分ページ一覧パネル" role="complementary">
+              <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
+              <div class="text-view-header">
+                <strong class="text-view-title">差分ページ一覧</strong>
+                <span id="diff-panel-badge" style="display:none;"></span>
+                <span style="flex:1;"></span>
+                <button class="panel-close-btn" id="btn-close-diff-panel" aria-label="閉じる" title="閉じる (Esc)">✕</button>
+              </div>
+              <div class="panel-legend">
+                <span><span class="diff-dot" aria-hidden="true"></span>画像</span>
+                <span><span class="diff-dot text" aria-hidden="true"></span>テキスト</span>
+                <span style="flex:1;"></span>
+                <button class="ctrl-btn" id="btn-rescan" title="現在の感度・オフセット・ページ対応で再スキャン" aria-label="再スキャン">⟳</button>
+                <button class="ctrl-btn" id="btn-diff-filter" title="差分ページのみ表示">絞り込み</button>
+              </div>
+              <div class="panel-subheader">ページ一覧
+                <span style="flex:1;"></span>
+                <button class="ctrl-btn" id="btn-diff-prev" title="前の差分ページへ (Shift+Tab)">↑ 前</button>
+                <button class="ctrl-btn" id="btn-diff-next" title="次の差分ページへ (Tab)">↓ 次</button>
+              </div>
+              <div class="diff-summary-list" id="diff-summary-list"></div>
+              <div id="diff-panel-resizer" aria-label="領域一覧の高さを調整" style="display:none;"></div>
+              <div id="region-list-wrap" style="display:none;">
+                <div class="panel-subheader">このページの差分領域 <span id="region-count"></span>
+                  <span style="flex:1;"></span>
+                  <button class="ctrl-btn" id="btn-region-prev" title="前の差分領域へ (P)" aria-label="前の差分領域">◀ 前</button>
+                  <button class="ctrl-btn" id="btn-region-next" title="次の差分領域へ (N)" aria-label="次の差分領域">次 ▶</button>
+                </div>
+                <div id="region-list" role="list"></div>
+              </div>
+            </div>
+
+            <!-- Text diff panel (タブ非依存の独立パネル) -->
+            <div id="text-view" aria-label="テキスト差分パネル" role="complementary">
+              <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
+              <div class="text-view-header">
+                <strong class="text-view-title">テキスト差分</strong>
+                <span id="text-stats" aria-live="polite">—</span>
+                <span style="flex:1;"></span>
+                <button class="toolbar-btn" id="btn-text-report" title="このページのテキスト差分をHTMLレポートとして保存">
+                  レポート保存
+                </button>
+                <button class="panel-close-btn" id="btn-close-text" aria-label="テキスト差分パネルを閉じる" title="閉じる (Esc)">✕</button>
+              </div>
+              <div class="text-pickup-header">差分箇所一覧 <span class="text-pickup-hint">クリックでPDF上の該当箇所へズーム</span></div>
+              <div id="text-pickup" role="list" aria-label="テキスト差分箇所一覧"></div>
+              <div class="text-view-hint">全文（差分テキストをクリックしてもズームできます）</div>
+              <div class="text-diff-body" id="text-diff-body"></div>
             </div>
           </div>
 
-          <!-- Canvas view -->
-          <div class="view-container" id="view-container">
-            <canvas id="view-canvas" class="view-canvas" style="display:none;"></canvas>
-            <div id="marquee-box" class="marquee-box"></div>
-            <div class="view-placeholder" id="view-placeholder">
-              <svg width="64" height="64" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24"
-                opacity="0.3">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-              <p>A / B のPDFをドロップまたはボタンで開いてください</p>
-              <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
-            </div>
-            <div id="scan-progress"></div>
-          </div>
-        </div>
-
-        <!-- NAV BAR -->
-        <div id="nav-bar">
-          <button class="nav-btn" id="btn-prev" disabled>
-            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
-            前のページ
-          </button>
-          <span id="page-info" title="クリックしてページ番号を入力" style="cursor:pointer;">—</span>
-          <button class="nav-btn" id="btn-next" disabled>
-            次のページ
-            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <polyline points="9 18 15 12 9 6" />
-            </svg>
-          </button>
         </div>
       </div>
     </div>
 
     <!-- STATUS BAR -->
     <div id="statusbar">
-      <span class="status-msg" id="status-msg">SABUNへようこそ！PDFをドラッグ＆ドロップするか、A/Bボタンで開いてください。</span>
+      <span class="status-msg" id="status-msg" aria-live="polite">SABUNへようこそ！PDFをドラッグ＆ドロップするか、A/Bボタンで開いてください。</span>
+      <span id="status-cache" title="ページキャッシュ使用量"></span>
       <span class="status-zoom" id="status-zoom">100%</span>
     </div>
   </div>
 
-  <!-- DIFF SUMMARY PANEL -->
-  <div id="diff-summary-panel">
-    <div class="panel-header">
-      <span>差分ページ一覧
-        <span id="diff-panel-badge" style="display:none;"></span>
-      </span>
-      <div style="display:flex;align-items:center;gap:4px;">
-        <button id="btn-diff-filter" title="差分ページのみ表示" style="
-          background:none; border:1px solid var(--border);
-          border-radius:4px; padding:2px 6px;
-          font-size:10px; cursor:pointer;
-          color:var(--text-muted);
-        ">絞り込み</button>
-        <button id="btn-close-diff-panel">✕</button>
-      </div>
-    </div>
-    <div class="diff-summary-list" id="diff-summary-list"></div>
-    <div class="diff-summary-nav">
-      <button id="btn-diff-prev">↑ 前の差分</button>
-      <button id="btn-diff-next">↓ 次の差分</button>
-    </div>
-  </div>
-
   <!-- DROP OVERLAY -->
-  <div id="drop-overlay">PDFをドロップ</div>
+  <div id="drop-overlay" aria-hidden="true">PDFをドロップ<br><small style="font-size:14px;opacity:0.8;">左のA/Bサムネイル欄にドロップすると読み込み先を指定できます</small></div>
 
   <!-- HELP MODAL -->
-  <div id="help-modal" class="modal">
+  <div id="help-modal" class="modal" role="dialog" aria-modal="true" aria-label="使用説明">
     <div class="modal-inner help-modal-inner">
       <div class="modal-header">
         <h2>📖 SABUN 使用説明</h2>
-        <button class="modal-close" id="btn-close-help">✕</button>
+        <button class="modal-close" id="btn-close-help" aria-label="閉じる">✕</button>
       </div>
       <div class="help-content">
         <h3>1. ファイルの読み込み</h3>
         <ul>
           <li>「A を開く」「B を開く」ボタン、または <kbd>Ctrl+A</kbd> / <kbd>Ctrl+B</kbd></li>
-          <li>画面へのPDFドラッグ&amp;ドロップ</li>
+          <li>画面へのPDFドラッグ&amp;ドロップ（2ファイル同時ドロップでA/Bに割り当て）</li>
         </ul>
         <h3>2. 比較モード</h3>
         <ul>
-          <li><strong>Aビュー [1]</strong> — 前のPDFを表示</li>
-          <li><strong>Bビュー [2]</strong> — 後のPDFを表示</li>
-          <li><strong>ハイライト差分 [3]</strong> — 増減のピクセルを個別の色で強調</li>
-          <li><strong>絶対値差 [4]</strong> — ピクセルの変更量をグレースケールで表示</li>
-          <li><strong>あおり [5]</strong> — AとBをタイマーで交互に切り替え</li>
+          <li><strong>A [1] / B [2]</strong> — 各PDFを単独表示</li>
+          <li><strong>ハイライト [3]</strong> — B側のみの要素(追加)を<span style="color:#ff4b00;">橙</span>、A側のみの要素(削除)を<span style="color:#00c4ff;">水色</span>で強調。差分領域は黄色枠+番号、<kbd>N</kbd>/<kbd>P</kbd>でジャンプ</li>
+          <li><strong>あおり [4]</strong> — AとBをタイマーで交互表示</li>
+          <li><strong>絶対値差 [5]</strong> — 変更量をグレースケール表示</li>
+          <li><strong>スプリット [6]</strong> — 左A / 右B の分割表示。ドラッグで境界を移動</li>
+          <li><strong>テキスト差分パネル [7]</strong> — タブとは独立したサイドパネル。差分箇所一覧(変更/追加/削除)のクリックでPDF上の該当箇所へズーム。HTMLレポート保存可</li>
+          <li><strong>差分ページ一覧パネル [8 / Ctrl+L]</strong> — ページ一覧と差分領域一覧の2段構成サイドパネル。各段に前後ジャンプボタン、境界はドラッグで高さ調整可</li>
+          <li>PDF内のコメント注釈の表示は、ハイライト/絶対値差以外のモードで「PDF内の注釈を表示」をONにすると見られます（差分判定には影響しません）</li>
         </ul>
-        <h3>3. ショートカット一覧</h3>
+        <h3>3. 位置合わせとページ対応</h3>
+        <ul>
+          <li><strong>自動位置合わせ</strong> — オフセット横の「自動」でON。現在ページのA/BのズレをWorkerが自動推定して補正します。もう一度押すとOFFになり元のオフセットへ戻ります</li>
+          <li><strong>ページ番号がズレるPDF同士</strong> — A/Bのサムネイルをそれぞれクリックして見たいページの組み合わせを選べます（ページ送りはそのズレを保ったまま動きます）</li>
+          <li><strong>A/Bサムネイル欄へのドロップ</strong> — PDFをA欄/B欄に直接ドロップすると読み込み先を指定できます(再読み込みに便利)</li>
+        </ul>
+        <h3>4. 検版レポート</h3>
+        <ul>
+          <li>ツールバーの「レポート」で全差分ページの<strong>ハイライト画像・差分領域一覧・テキスト差分</strong>を1つのHTMLに出力。開いて「印刷 / PDF保存」ボタンからPDF化できます</li>
+        </ul>
+        <h3>5. 差分検出のしくみ</h3>
+        <ul>
+          <li>レンダリング解像度は固定（画質: 標準2x / 高3x）。<strong>ズームしても差分結果は変わりません</strong></li>
+          <li>PDF内のコメント注釈は差分判定・比較ビューから常に除外されます</li>
+          <li>A/B読込後、全ページを自動スキャン（画像＋テキスト）。橙ドット=画像差分 / 青ドット=テキスト差分</li>
+          <li>「感度」変更後は差分一覧パネルの ⟳ で再スキャン</li>
+        </ul>
+        <h3>6. 注釈（Adobe Acrobat互換）</h3>
+        <ul>
+          <li><strong>対象の指定</strong> — 注釈バー先頭の「対象」で A / B / A+B を選択。手描き・自動付与・保存すべてに適用されます</li>
+          <li><strong>記入者</strong> — 注釈の作成者名（デフォルト: ADP）。PDF注釈・XFDFの作成者として記録され、Acrobatのコメント一覧に表示されます</li>
+          <li>ツール: 選択<kbd>V</kbd> / 矩形<kbd>R</kbd> / 楕円<kbd>O</kbd> / 線<kbd>L</kbd> / 矢印<kbd>A</kbd>（注釈バー表示中のみ・<strong>同じキーをもう一度押すと解除</strong>）。描画後は自動で選択ツールに戻ります（「維持」ONで連続描画）</li>
+          <li><strong>複製</strong> — 選択中の注釈を <kbd>Ctrl/Cmd+C</kbd> → <kbd>Ctrl/Cmd+V</kbd> でコピペ、または <kbd>Option/Alt</kbd>+ドラッグでその場複製</li>
+          <li><strong>サイズ変更</strong> — 選択中の注釈は四隅（線・矢印は両端点）のハンドルをドラッグ。テキストは高さに合わせて文字サイズも変わります。矢印キーで1pt移動（<kbd>Shift</kbd>で10pt）</li>
+          <li><strong>スタイル</strong> — 線色 / 塗り(なし・色) / 線幅(0.5〜5pt) / 線種(実線・破線・点線)。選択中の注釈にも即適用</li>
+          <li><strong>注釈中の画面操作</strong> — ツール選択中も <kbd>Space</kbd>ドラッグ / マウス中ボタン / ホイール / <kbd>Ctrl+ホイール</kbd> でパン・ズームできます</li>
+          <li><strong>差分領域を注釈化</strong> — 検出された差分領域の枠サイズで矩形注釈を一括付与（初期値: 塗りなし・赤線・1pt実線）</li>
+          <li><strong>注釈入りPDF保存</strong> — Acrobatの<strong>長方形・楕円・線・矢印・テキストコメント</strong>として実PDFに埋め込み。Acrobatでそのまま選択・編集・削除できます</li>
+          <li><strong>XFDF書き出し</strong> — Acrobatの「コメント &gt; 読み込み」で元PDFに注釈として取り込む場合に使用</li>
+          <li><strong>注釈一覧</strong> — 注釈バーの「一覧」で全ページの注釈をパネル表示。クリックでジャンプ、✕で個別削除</li>
+        </ul>
+        <h3>7. ショートカット一覧</h3>
         <table>
           <tr>
             <td><kbd>Ctrl+A/B</kbd></td>
@@ -293,7 +409,7 @@
           </tr>
           <tr>
             <td><kbd>Ctrl+S</kbd></td>
-            <td>現在ビューを画像として保存</td>
+            <td>現在ビューを保存（画像タブ: PNG / テキストタブ: HTMLレポート）</td>
           </tr>
           <tr>
             <td><kbd>Ctrl+L</kbd></td>
@@ -316,6 +432,10 @@
             <td>(一時的に)パン移動</td>
           </tr>
           <tr>
+            <td>ホイール</td>
+            <td>スクロール（<kbd>Ctrl+ホイール</kbd> でズーム）</td>
+          </tr>
+          <tr>
             <td><kbd>Ctrl+0</kbd></td>
             <td>画面にフィット</td>
           </tr>
@@ -324,12 +444,20 @@
             <td>ズームイン/アウト</td>
           </tr>
           <tr>
-            <td><kbd>1–5</kbd></td>
-            <td>画像タブの切り替え</td>
+            <td><kbd>1–6</kbd></td>
+            <td>比較モードの切り替え</td>
+          </tr>
+          <tr>
+            <td><kbd>7</kbd> / <kbd>8</kbd></td>
+            <td>テキスト差分パネル / 差分ページ一覧パネル</td>
           </tr>
           <tr>
             <td><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></td>
             <td>次/前の差分ページへジャンプ</td>
+          </tr>
+          <tr>
+            <td><kbd>N</kbd> / <kbd>P</kbd></td>
+            <td>次/前の差分領域へズーム ※ハイライトタブ</td>
           </tr>
           <tr>
             <td><kbd>↑↓</kbd> / <kbd>, .</kbd></td>
@@ -337,28 +465,40 @@
           </tr>
           <tr>
             <td><kbd>F</kbd></td>
-            <td>あおり速度サイクル（遅い/普通/速い）※あおりタブのみ</td>
+            <td>あおり速度サイクル ※あおりタブのみ</td>
           </tr>
           <tr>
             <td><kbd>↑↓←→</kbd></td>
-            <td>オフセット1px微調整 ※オフセットモード時</td>
+            <td>オフセット1px微調整（<kbd>Shift</kbd>で10px） ※オフセットモード時</td>
           </tr>
           <tr>
-            <td><kbd>Shift+↑↓←→</kbd></td>
-            <td>オフセット10px移動 ※オフセットモード時</td>
+            <td><kbd>Delete</kbd></td>
+            <td>選択中の注釈を削除</td>
+          </tr>
+          <tr>
+            <td><kbd>Esc</kbd></td>
+            <td>パネル/モーダル/注釈ツールを閉じる</td>
           </tr>
           <tr>
             <td>ページ番号クリック</td>
             <td>任意ページへジャンプ（Enter確定 / Escキャンセル）</td>
           </tr>
         </table>
+        <h3>8. 安定動作のための設計</h3>
+        <ul>
+          <li>差分計算はWeb Workerで実行され、大きなPDFでも操作がブロックされません</li>
+          <li>レンダリング解像度固定により、ズーム時の再計算が発生しません</li>
+          <li>ページキャッシュは搭載メモリに応じて上限管理（ステータスバーに使用量表示）</li>
+          <li>サムネイルは表示範囲のみ逐次生成し、メモリを節約します</li>
+        </ul>
       </div>
     </div>
   </div>
 
   <!-- SCRIPTS -->
   <script src="lib/pixelmatch-browser.js"></script>
-  <!-- TEXT COMPARE REMOVED: diff_match_patch is no longer used -->
+  <script src="lib/diff_match_patch.js"></script>
+  <script src="lib/pdf-lib.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 
