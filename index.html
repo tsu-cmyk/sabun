@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SABUN</title>
-  <meta name="description" content="PDFの差分を高精度で比較するPWAツール">
+  <meta name="description" content="PDF差分比較PWAツール">
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="style.css">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f9">
@@ -179,6 +179,12 @@
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="absdiff">絶対値差 <kbd>5</kbd></button>
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="split">スプリット <kbd>6</kbd></button>
 
+            <!-- Region overlay controls (A/B以外の全タブ共通) -->
+            <div id="region-controls" class="tab-controls">
+              <label title="差分領域の枠を表示"><input type="checkbox" id="toggle-regions" checked> 領域枠</label>
+              <span id="diff-pixel-label" aria-live="polite"></span>
+            </div>
+
             <!-- Highlight controls -->
             <div id="highlight-controls" class="tab-controls">
               <label>感度
@@ -189,11 +195,9 @@
                 </select>
               </label>
               <label title="差分画素を太く強調表示"><input type="checkbox" id="toggle-emphasize" checked> 強調</label>
-              <label title="差分領域の枠を表示"><input type="checkbox" id="toggle-regions" checked> 領域枠</label>
               <span class="hl-legend" title="橙: B側のみ(追加) / 水色: A側のみ(削除)">
                 <i class="sw sw-orange" aria-hidden="true"></i>追加 <i class="sw sw-cyan" aria-hidden="true"></i>削除
               </span>
-              <span id="diff-pixel-label" aria-live="polite"></span>
             </div>
 
             <!-- Aori speed control -->
@@ -362,10 +366,11 @@
         <h3>2. 比較モード</h3>
         <ul>
           <li><strong>A [1] / B [2]</strong> — 各PDFを単独表示</li>
-          <li><strong>ハイライト [3]</strong> — B側のみの要素(追加)を<span style="color:#ff4b00;">橙</span>、A側のみの要素(削除)を<span style="color:#00c4ff;">水色</span>で強調。差分領域は黄色枠+番号、<kbd>N</kbd>/<kbd>P</kbd>でジャンプ</li>
+          <li><strong>ハイライト [3]</strong> — B側のみの要素(追加)を<span style="color:#ff4b00;">橙</span>、A側のみの要素(削除)を<span style="color:#00c4ff;">水色</span>で強調</li>
           <li><strong>あおり [4]</strong> — AとBをタイマーで交互表示</li>
           <li><strong>絶対値差 [5]</strong> — 変更量をグレースケール表示</li>
           <li><strong>スプリット [6]</strong> — 左A / 右B の分割表示。ドラッグで境界を移動</li>
+          <li><strong>領域枠</strong> — 差分領域を黄色枠+番号で表示(A/B以外の全モード共通、「領域枠」チェックでON/OFF)。<kbd>N</kbd>/<kbd>P</kbd>でジャンプ</li>
           <li><strong>テキスト差分パネル [7]</strong> — タブとは独立したサイドパネル。差分箇所一覧(変更/追加/削除)のクリックでPDF上の該当箇所へズーム。HTMLレポート保存可</li>
           <li><strong>差分ページ一覧パネル [8 / Ctrl+L]</strong> — ページ一覧と差分領域一覧の2段構成サイドパネル。各段に前後ジャンプボタン、境界はドラッグで高さ調整可</li>
           <li>PDF内のコメント注釈の表示は、ハイライト/絶対値差以外のモードで「PDF内の注釈を表示」をONにすると見られます（差分判定には影響しません）</li>
@@ -457,7 +462,7 @@
           </tr>
           <tr>
             <td><kbd>N</kbd> / <kbd>P</kbd></td>
-            <td>次/前の差分領域へズーム ※ハイライトタブ</td>
+            <td>次/前の差分領域へズーム ※A/B以外のタブ</td>
           </tr>
           <tr>
             <td><kbd>↑↓</kbd> / <kbd>, .</kbd></td>
