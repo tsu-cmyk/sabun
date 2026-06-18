@@ -10,6 +10,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // ハイライト感度 → pixelmatch threshold
 const HIGHLIGHT_THRESHOLDS = { high: 0.02, mid: 0.06, low: 0.12 };
+// 領域枠(差分領域オーバーレイ)を表示する対象タブ (A/B単独表示は対象外)
+const DIFF_TABS = ['highlight', 'absdiff', 'aori', 'split'];
 // スキャン感度 → グレー差しきい値 (0-255)
 const SCAN_GRAY_THRESHOLDS = { high: 4, mid: 8, low: 15 };
 const THUMB_SCALE = 0.12;
@@ -178,6 +180,7 @@ const aoriSpeedSlider = $('aori-speed-slider');
 const aoriSpeedLabel = $('aori-speed-label');
 const highlightControls = $('highlight-controls');
 const splitControls = $('split-controls');
+const regionControls = $('region-controls');
 const sensSelect = $('sens-select');
 const toggleRegions = $('toggle-regions');
 const toggleEmphasize = $('toggle-emphasize');
@@ -657,8 +660,12 @@ function navigateRegion(dir) {
   zoomToRegion(r);
   updateRegionList();
   // 枠の選択色を反映するため再描画
-  if (state.lastDiffView && state.activeSubTab === 'highlight') {
-    displayImageData(state.lastDiffView.img, state.regions.rs, true);
+  if (state.activeSubTab === 'highlight' || state.activeSubTab === 'absdiff') {
+    if (state.lastDiffView) displayImageData(state.lastDiffView.img, state.regions.rs, true);
+  } else if (state.activeSubTab === 'aori') {
+    drawPairFrame(state.aoriFlag);
+  } else if (state.activeSubTab === 'split') {
+    compositeSplit();
   }
   setStatus(`差分領域 ${state.regionIdx + 1} / ${n}`, 2000);
 }
@@ -1275,10 +1282,23 @@ function shapeToEditorValue(s, page) {
   };
 }
 
+// 画像バッファなしの軽量opで差分領域を計算 (ハイライト以外のタブで領域枠を表示するために使用)
+async function computeRegionsOnly(imgA, imgB) {
+  const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
+  const call = workerCall('regions', imgA, imgB, { threshold });
+  if (!call) return { count: 0, regions: [] };
+  try {
+    const m = await call;
+    return { count: m.count || 0, regions: m.regions || [] };
+  } catch {
+    return { count: 0, regions: [] };
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // 差分領域 → 矩形注釈の自動一括付与
 // ─────────────────────────────────────────────────────────
-// ページの差分領域を計算(画像バッファなしの軽量op)。
+// ページの差分領域を計算。
 // 戻り値: { regions: [{x,y,w,h}], rs, pageHA, pageHB } (画像px)
 async function computeRegionsForPage(pageIdx) {
   const visualScale = computeVisualScale();
@@ -1287,12 +1307,7 @@ async function computeRegionsForPage(pageIdx) {
     getOrRender('b', bPageFor(pageIdx), visualScale, false),
   ]);
   const imgB = alignBToA(eb, ea);
-  const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
-  const call = workerCall('regions', ea.img, imgB, { threshold });
-  let regions = [];
-  if (call) {
-    try { regions = (await call).regions || []; } catch { regions = []; }
-  }
+  const { regions } = await computeRegionsOnly(ea.img, imgB);
   return { regions, rs: ea.scale, pageHA: ea.img.height / ea.scale, pageHB: eb.img.height / eb.scale };
 }
 
@@ -1337,7 +1352,7 @@ async function autoAnnotateRegions(scope = 'page') {
       if (scope === 'all') setStatus(`差分領域を注釈化中... ${i + 1} / ${pages.length}`);
       // 現在ページで計算済みの領域があれば再利用
       let info;
-      if (pageIdx === state.pageA && state.regions && state.regions.list.length && state.activeSubTab === 'highlight') {
+      if (pageIdx === state.pageA && state.regions && state.regions.list.length && DIFF_TABS.includes(state.activeSubTab)) {
         info = {
           regions: state.regions.list, rs: state.regions.rs,
           pageHA: viewCanvas.height / state.regions.rs,
@@ -2296,8 +2311,8 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  // N/P: 差分領域ナビゲーション (ハイライトタブ)
-  if (!ctrl && !alt && state.activeSubTab === 'highlight') {
+  // N/P: 差分領域ナビゲーション (A/B以外の全タブ)
+  if (!ctrl && !alt && DIFF_TABS.includes(state.activeSubTab)) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); navigateRegion(1); return; }
     if (e.key === 'p' || e.key === 'P') { e.preventDefault(); navigateRegion(-1); return; }
   }
@@ -3001,6 +3016,7 @@ function drawPairFrame(showB) {
   if (!pr) return;
   const ctx = setupCanvas(pr.w, pr.h, pr.rs);
   ctx.drawImage(showB ? pr.bmpB : pr.bmpA, 0, 0);
+  if (state.showRegions && state.regions && state.regions.list.length) drawRegionOverlay(ctx);
   drawCornerLabel(ctx, showB ? 'B' : 'A');
 }
 
@@ -3013,6 +3029,7 @@ function compositeSplit() {
   if (sx < pr.w) {
     ctx.drawImage(pr.bmpB, sx, 0, pr.w - sx, pr.h, sx, 0, pr.w - sx, pr.h);
   }
+  if (state.showRegions && state.regions && state.regions.list.length) drawRegionOverlay(ctx);
   const lw = Math.max(2, Math.round(DPR * 2));
   ctx.save();
   ctx.fillStyle = '#3b82f6';
@@ -3057,6 +3074,7 @@ function stopAori() {
 // ─────────────────────────────────────────────────────────
 function updateTabControls() {
   const t = state.activeSubTab;
+  regionControls.style.display = DIFF_TABS.includes(t) ? 'flex' : 'none';
   aoriControls.style.display = t === 'aori' ? 'flex' : 'none';
   highlightControls.style.display = (t === 'highlight') ? 'flex' : 'none';
   splitControls.style.display = t === 'split' ? 'flex' : 'none';
@@ -3086,8 +3104,14 @@ async function renderDiffComposite(token, op, forceFit) {
     const imgB = alignBToA(eb, ea);
     busyShow();
     try {
-      const res = await computeDiffImage(op, ea.img, imgB);
-      result = { key: cacheKey, img: res.img, count: res.count, regions: res.regions };
+      // 絶対値差は画像バッファのみを返すため、領域枠は別途軽量opで計算する
+      const [imgRes, regionsRes] = await Promise.all([
+        computeDiffImage(op, ea.img, imgB),
+        op === 'highlight' ? null : computeRegionsOnly(ea.img, imgB),
+      ]);
+      const regions = op === 'highlight' ? (imgRes.regions || []) : regionsRes.regions;
+      const count = op === 'highlight' ? (imgRes.count || 0) : regionsRes.count;
+      result = { key: cacheKey, img: imgRes.img, count, regions };
     } finally {
       busyHide();
     }
@@ -3095,15 +3119,11 @@ async function renderDiffComposite(token, op, forceFit) {
     state.lastDiffView = result;
   }
 
-  if (op === 'highlight') {
-    state.regions = { list: result.regions || [], rs: ea.scale };
-    state.diffPixels = result.count || 0;
-  } else {
-    state.regions = null;
-  }
+  state.regions = { list: result.regions || [], rs: ea.scale };
+  state.diffPixels = result.count || 0;
   state.regionIdx = -1;
   updateRegionList();
-  displayImageData(result.img, ea.scale, op === 'highlight');
+  displayImageData(result.img, ea.scale, true);
   if (forceFit) fitToView();
   return true;
 }
@@ -3140,15 +3160,23 @@ async function renderCurrentView(forceFit = false) {
 
   // ペアビットマップモード (あおり / スプリット)
   // PDF埋め込み注釈は表示設定に従う(差分判定には影響しない — スキャン/ハイライトは常に注釈なし)
-  const [ea, eb] = await Promise.all([
+  const [ea, eb, eaPlain, ebPlain] = await Promise.all([
     getOrRender('a', state.pageA, visualScale, state.showAnnA),
     getOrRender('b', state.pageB, visualScale, state.showAnnB),
+    getOrRender('a', state.pageA, visualScale, false),
+    getOrRender('b', state.pageB, visualScale, false),
   ]);
   if (token !== _renderToken) return;
   const imgB = alignBToA(eb, ea);
-  await preparePair(ea.img, imgB, ea.scale);
+  const imgBPlain = alignBToA(ebPlain, eaPlain);
+  const [, regionsRes] = await Promise.all([
+    preparePair(ea.img, imgB, ea.scale),
+    computeRegionsOnly(eaPlain.img, imgBPlain),
+  ]);
   if (token !== _renderToken) { closePair(); return; }
-  state.regions = null;
+  state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
+  state.diffPixels = regionsRes.count;
+  state.regionIdx = -1;
   updateRegionList();
 
   if (tab === 'aori') {
@@ -3281,7 +3309,7 @@ function updateRegionList() {
   const wrap = $('region-list-wrap');
   const listEl = $('region-list');
   const cnt = $('region-count');
-  const isDiffTab = state.activeSubTab === 'highlight';
+  const isDiffTab = DIFF_TABS.includes(state.activeSubTab);
   const list = (isDiffTab && state.regions) ? state.regions.list : [];
 
   if (diffPixelLabel) {
