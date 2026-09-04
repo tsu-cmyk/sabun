@@ -10,19 +10,33 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 // ─────────────────────────────────────────────────────────
 // ハイライト感度 → pixelmatch threshold
 const HIGHLIGHT_THRESHOLDS = { high: 0.02, mid: 0.06, low: 0.12 };
+// 描画ノイズだけの極小成分を除くための最小差分画素数（領域ブロック単位）。
+// 文字や細線の実変更は周辺に複数画素の差が生じるため、単発のAAノイズだけを
+// 抑制できる。高感度ではほぼ抑制せず、標準を既定値にする。
+const MIN_DIFF_BLOCK_PIXELS = { high: 1, mid: 5, low: 12 };
 // 領域枠(差分領域オーバーレイ)を表示する対象タブ (A/B単独表示は対象外)
 const DIFF_TABS = ['highlight', 'absdiff', 'aori', 'split'];
 // スキャン感度 → グレー差しきい値 (0-255)
 const SCAN_GRAY_THRESHOLDS = { high: 4, mid: 8, low: 15 };
+// 二段階スキャン: まず低解像度で候補ページだけを抽出し、候補のみを原寸で確定する。
+const SCAN_COARSE_SCALE = 0.5;
+const SCAN_FINE_SCALE = 1.0;
+const SCAN_COARSE_GRAY_THRESHOLDS = { high: 9, mid: 16, low: 28 };
 const THUMB_SCALE = 0.12;
+// 二段階スキャンの確定比較は1x。第1段階はさらに低解像度で行う。
+// 埋め込み文字の微小変更は別系統のテキスト差分でも検出する。
 const DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1.0), 2.0);
 // レンダリング解像度(固定)。ズームに依存しないため差分結果が常に一定。
 const QUALITY_SCALES = { std: 2.0, high: 3.0 };
 // 1キャンバスの画素数上限 (約16.7MP) — 大判PDFでのメモリ爆発/クラッシュを防ぐ
 const MAX_CANVAS_PIXELS = 4096 * 4096;
-// キャッシュ上限(片側あたり): 搭載メモリに応じて 64MB / 128MB
+// キャッシュ上限(片側あたり): 高解像度PDFでも常駐メモリを抑える。
 const DEVICE_GB = navigator.deviceMemory || 4;
-const MAX_CACHE_BYTES = (DEVICE_GB >= 8 ? 128 : 64) * 1024 * 1024;
+// 表示キャッシュは小さく保つ。大きなPDFでは PDF.js の内部キャッシュも加わるため、
+// SABUN側が数十MBを常駐しないことを優先する。
+const MAX_CACHE_BYTES = (DEVICE_GB >= 8 ? 32 : 16) * 1024 * 1024;
+const MAX_TEXT_CACHE_ENTRIES = 8;
+const MAX_NORM_TEXT_CACHE_ENTRIES = 48;
 
 // cMap / 標準フォントはローカル同梱版を使用(オフライン動作)
 // ※ 相対パスは pdf.js worker 基準で解決されるため、ページ基準の絶対URLにする
@@ -55,7 +69,7 @@ const state = {
   renderScale: 0,
   panX: 0,
   panY: 0,
-  quality: 'high', // 'std' | 'high'
+  quality: 'std', // 'std' | 'high'
 
   // インタラクションモード
   persistentMode: 'cursor',
@@ -98,6 +112,7 @@ const state = {
   autoAlignPrev: null,
 
   // 差分検出
+  // UIの初期選択値（「標準」）と必ず一致させる。
   sensitivity: 'mid',
   emphasize: true,
   showRegions: true,
@@ -163,6 +178,7 @@ const busyIndicator = $('busy-indicator');
 const textView = $('text-view');
 const textDiffBody = $('text-diff-body');
 const textStats = $('text-stats');
+const textPages = $('text-pages');
 const textPickup = $('text-pickup');
 const btnTextPanel = $('btn-text-panel');
 const locateMarker = $('locate-marker');
@@ -307,10 +323,14 @@ async function renderPageData(page, scale, annotations) {
   return imgData;
 }
 
-async function scanRenderPage(doc, pageIndex) {
+async function scanRenderPage(doc, pageIndex, scanScale = SCAN_FINE_SCALE, cleanupAfter = false) {
   const page = await doc.getPage(pageIndex + 1);
-  const scale = clampScaleForPage(page, 1.0);
-  return renderPageData(page, scale, false);
+  const scale = clampScaleForPage(page, scanScale);
+  try {
+    return await renderPageData(page, scale, false);
+  } finally {
+    if (cleanupAfter) { try { page.cleanup(); } catch { /* ignore */ } }
+  }
 }
 
 async function renderThumbBlobURL(doc, pageIndex) {
@@ -381,8 +401,27 @@ function evictOtherScales(keepScale) {
 function updateCacheLabel() {
   if (!statusCache) return;
   const mb = Math.round((cacheBytes.a + cacheBytes.b) / 1048576);
-  statusCache.textContent = `キャッシュ ${mb}MB`;
-  statusCache.title = `A: ${Math.round(cacheBytes.a / 1048576)}MB / B: ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)`;
+  const textEntries = textCache.a.size + textCache.b.size;
+  const heap = performance.memory && performance.memory.usedJSHeapSize
+    ? ` / JS ${Math.round(performance.memory.usedJSHeapSize / 1048576)}MB` : '';
+  statusCache.textContent = `メモリ目安 ${mb}MB${heap}`;
+  statusCache.title = `SABUN画像キャッシュ: A ${Math.round(cacheBytes.a / 1048576)}MB / B ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)、テキスト詳細キャッシュ ${textEntries}ページ${heap}`;
+}
+
+function runtimeMemoryNote() {
+  const cached = Math.round((cacheBytes.a + cacheBytes.b) / 1048576);
+  const heap = performance.memory && performance.memory.usedJSHeapSize
+    ? ` / JS ${Math.round(performance.memory.usedJSHeapSize / 1048576)}MB` : '';
+  return `メモリ目安: キャッシュ ${cached}MB${heap}`;
+}
+
+function releasePdfWorkingSet() {
+  // PDF.js のページごとの描画・演算子キャッシュを、全件スキャン後に解放する。
+  // 表示中のページは必要になった時に再生成されるため、100ページ級でも常駐を避けられる。
+  for (const doc of [state.docA, state.docB]) {
+    try { doc?.cleanup(); } catch { /* cleanup 非対応のPDFは無視 */ }
+  }
+  updateCacheLabel();
 }
 
 /**
@@ -473,12 +512,13 @@ function computeAbsDiffSync(imgA, imgB) {
   return out;
 }
 
-function hasDiffSync(imgA, imgB, threshold, minPx) {
+function hasDiffSync(imgA, imgB, threshold, minPx, minBlockPixels = 5) {
   if (imgA.width !== imgB.width || imgA.height !== imgB.height) return true;
   const w = imgA.width, h = imgA.height;
   const a = imgA.data, b = imgB.data;
   const W = Math.floor(w / 2), H = Math.floor(h / 2);
-  let cnt = 0;
+  const bw = Math.ceil(w / 12);
+  const blocks = new Uint16Array(bw * Math.ceil(h / 12));
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       let ga = 0, gb = 0;
@@ -490,16 +530,21 @@ function hasDiffSync(imgA, imgB, threshold, minPx) {
         }
       }
       if (Math.abs(ga - gb) / 4 > threshold) {
-        if (++cnt > minPx) return true;
+        const px = x * 2, py = y * 2;
+        blocks[((py / 12) | 0) * bw + ((px / 12) | 0)]++;
       }
     }
+  }
+  for (const count of blocks) {
+    if (count >= minBlockPixels && count > minPx) return true;
   }
   return false;
 }
 
 async function computeDiffImage(op, imgA, imgB) {
   const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
-  const call = workerCall(op, imgA, imgB, { threshold, emphasize: state.emphasize });
+  const minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity];
+  const call = workerCall(op, imgA, imgB, { threshold, minBlockPixels, emphasize: state.emphasize });
   if (call) {
     try {
       const m = await call;
@@ -545,7 +590,11 @@ function displayImageData(imgData, rs, withRegions = false) {
 }
 
 function drawRegionOverlay(ctx) {
-  const list = state.regions.list.slice(0, 100);
+  const list = state.regions.list;
+  // 数百件に達するページでは、枠をすべて描画しつつ番号だけ省略する。
+  // これにより100件以降に枠が出ない問題と、番号で紙面が読めなくなる問題を
+  // 同時に避ける。
+  const showLabels = list.length <= 200;
   ctx.save();
   const fs = Math.round(9 * DPR);
   ctx.font = `bold ${fs}px sans-serif`;
@@ -558,15 +607,17 @@ function drawRegionOverlay(ctx) {
     ctx.lineWidth = Math.max(1.25, Math.round(DPR * (i === state.regionIdx ? 1.6 : 0.9) * 2) / 2);
     ctx.setLineDash([6 * DPR, 4 * DPR]);
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-    const label = String(i + 1);
-    const tw = ctx.measureText(label).width + fs * 0.6;
-    const lx = Math.max(0, r.x);
-    const ly = Math.max(0, r.y - fs * 1.3);
-    ctx.setLineDash([]);
-    ctx.fillStyle = i === state.regionIdx ? 'rgba(255, 80, 80, 1)' : 'rgba(255, 212, 0, 0.95)';
-    ctx.fillRect(lx, ly, tw, fs * 1.25);
-    ctx.fillStyle = '#000';
-    ctx.fillText(label, lx + fs * 0.3, ly + fs * 0.12);
+    if (showLabels || i === state.regionIdx) {
+      const label = String(i + 1);
+      const tw = ctx.measureText(label).width + fs * 0.6;
+      const lx = Math.max(0, r.x);
+      const ly = Math.max(0, r.y - fs * 1.3);
+      ctx.setLineDash([]);
+      ctx.fillStyle = i === state.regionIdx ? 'rgba(255, 80, 80, 1)' : 'rgba(255, 212, 0, 0.95)';
+      ctx.fillRect(lx, ly, tw, fs * 1.25);
+      ctx.fillStyle = '#000';
+      ctx.fillText(label, lx + fs * 0.3, ly + fs * 0.12);
+    }
   });
   ctx.restore();
 }
@@ -654,7 +705,7 @@ function zoomToRegion(r) {
 // 領域ナビゲーション (前/次)
 function navigateRegion(dir) {
   if (!state.regions || !state.regions.list.length) return;
-  const n = Math.min(state.regions.list.length, 100);
+  const n = state.regions.list.length;
   state.regionIdx = ((state.regionIdx + dir) % n + n) % n;
   const r = state.regions.list[state.regionIdx];
   zoomToRegion(r);
@@ -1285,7 +1336,8 @@ function shapeToEditorValue(s, page) {
 // 画像バッファなしの軽量opで差分領域を計算 (ハイライト以外のタブで領域枠を表示するために使用)
 async function computeRegionsOnly(imgA, imgB) {
   const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
-  const call = workerCall('regions', imgA, imgB, { threshold });
+  const minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity];
+  const call = workerCall('regions', imgA, imgB, { threshold, minBlockPixels });
   if (!call) return { count: 0, regions: [] };
   try {
     const m = await call;
@@ -1326,6 +1378,30 @@ function regionToShape(r, rs, pageH, sideShiftX, sideShiftY) {
   };
 }
 
+// 提出用の注釈は、検出用の細かな領域より広くまとめる。近接矩形を反復的に
+// 統合することで、文字列・価格・表内の一まとまりを一つの説明枠にする。
+function mergeRegionsForAnnotation(regions, rs) {
+  const gap = Math.max(48, Math.round(rs * 24));
+  const groups = [];
+  for (const region of [...regions].sort((a, b) => (a.y - b.y) || (a.x - b.x))) {
+    let merged = { ...region };
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const g = groups[i];
+      const dx = Math.max(0, Math.max(g.x, merged.x) - Math.min(g.x + g.w, merged.x + merged.w));
+      const dy = Math.max(0, Math.max(g.y, merged.y) - Math.min(g.y + g.h, merged.y + merged.h));
+      if (dx > gap || dy > gap) continue;
+      merged = {
+        x: Math.min(g.x, merged.x), y: Math.min(g.y, merged.y),
+        w: Math.max(g.x + g.w, merged.x + merged.w) - Math.min(g.x, merged.x),
+        h: Math.max(g.y + g.h, merged.y + merged.h) - Math.min(g.y, merged.y),
+      };
+      groups.splice(i, 1);
+    }
+    groups.push(merged);
+  }
+  return groups;
+}
+
 /**
  * 差分領域を矩形注釈として一括付与。
  * scope: 'page'(現在ページ) | 'all'(全差分ページ)
@@ -1361,6 +1437,9 @@ async function autoAnnotateRegions(scope = 'page') {
       } else {
         info = await computeRegionsForPage(pageIdx);
       }
+      // 画面に表示する差分領域と、注釈として出力する矩形を必ず一致させる。
+      // ここで追加統合すると、利用者が確認した範囲と提出用PDFの範囲が食い違う。
+      const submissionRegions = info.regions;
       for (const side of sides) {
         const shiftX = side === 'b' ? -state.offsetDx : 0;
         const shiftY = side === 'b' ? state.offsetDy : 0;
@@ -1368,7 +1447,7 @@ async function autoAnnotateRegions(scope = 'page') {
         const pageKey = side === 'b' ? bPageFor(pageIdx) : pageIdx;
         if (side === 'b' && (pageKey < 0 || pageKey >= state.totalB)) continue;
         const list = annotListFor(side, pageKey, true);
-        for (const r of info.regions) {
+        for (const r of submissionRegions) {
           list.push(regionToShape(r, info.rs, pageH, shiftX, shiftY));
           added++;
         }
@@ -1436,7 +1515,7 @@ function buildApOps(s, w, h, pad) {
   return ops;
 }
 
-function makeNativeAnnot(pdfDoc, s, mDate) {
+function makeNativeAnnot(pdfDoc, page, s, mDate) {
   const { PDFName, PDFString, PDFHexString } = PDFLib;
   const ctx = pdfDoc.context;
   const lw = Math.max(0.5, s.thickness ?? 1);
@@ -1463,6 +1542,7 @@ function makeNativeAnnot(pdfDoc, s, mDate) {
       DA: PDFString.of(`${strokeRgb.join(' ')} rg /Helv ${fontSize} Tf`),
       BS: { W: 0 },
       F: 4, T: PDFHexString.fromText(author), M: PDFString.of(mDate),
+      P: page.ref, NM: PDFString.of(`SABUN-${Date.now()}-${s.id}`), Subject: PDFHexString.fromText('SABUN 注釈'),
     });
   } else {
     const base = {
@@ -1471,6 +1551,7 @@ function makeNativeAnnot(pdfDoc, s, mDate) {
       Rect: [n2(x1), n2(y1), n2(x2), n2(y2)],
       C: strokeRgb, CA: 1, F: 4, BS: bs,
       T: PDFHexString.fromText(author), M: PDFString.of(mDate),
+      P: page.ref, NM: PDFString.of(`SABUN-${Date.now()}-${s.id}`), Subject: PDFHexString.fromText('SABUN 注釈'),
     };
     if (s.fill && s.type !== 'arrow' && s.type !== 'line') base.IC = hexToRgb01(s.fill);
     if (s.type === 'line') {
@@ -1509,7 +1590,7 @@ async function buildNativeAnnotatedPdf(side) {
   for (const [pageIdx, list] of annots[side]) {
     if (pageIdx >= pdfDoc.getPageCount() || !list.length) continue;
     const page = pdfDoc.getPage(pageIdx);
-    const refs = list.map(s => makeNativeAnnot(pdfDoc, s, mDate));
+    const refs = list.map(s => makeNativeAnnot(pdfDoc, page, s, mDate));
     count += refs.length;
     const key = PDFName.of('Annots');
     const existing = page.node.lookup(key);
@@ -1523,7 +1604,7 @@ async function buildNativeAnnotatedPdf(side) {
   return pdfDoc.save({ useObjectStreams: false });
 }
 
-// フォールバック: pdf.js saveDocument (FreeText/Ink) — pdf-lib で開けないPDF用
+// 互換フォールバック (Ink になるため、通常の保存経路からは使用しない)。
 async function buildInkAnnotatedPdf(side) {
   const doc = side === 'a' ? state.docA : state.docB;
   if (!doc) return null;
@@ -1549,15 +1630,17 @@ async function buildInkAnnotatedPdf(side) {
 async function saveAnnotatedPDF(opts = {}) {
   const download = opts.download !== false;
   const results = [];
-  let nativeFailed = false;
   // 「対象」設定のPDFのみダウンロードする
   const sides = opts.sides || annotTargetSides();
+  if (download && opts.confirm !== false) {
+    const detail = sides.map(side => `${side.toUpperCase()}: ${annotCount(side)}件 → ${(side === 'a' ? state.nameA : state.nameB) || side.toUpperCase()}`).join('\n');
+    if (!window.confirm(`注釈入りPDFを保存します。\n\n${detail}\n\n標準PDF注釈として保存します。よろしいですか？`)) return results;
+  }
   for (const side of sides) {
     if (annotCount(side) === 0) continue;
     busyShow();
     try {
       let bytes = null;
-      let native = true;
       try {
         bytes = await buildNativeAnnotatedPdf(side);
       } catch (e) {
@@ -1565,13 +1648,10 @@ async function saveAnnotatedPDF(opts = {}) {
         bytes = null;
       }
       if (!bytes) {
-        native = false;
-        nativeFailed = true;
-        try { bytes = await buildInkAnnotatedPdf(side); }
-        catch (e) { console.error(e); setStatus(`PDF保存エラー(${side.toUpperCase()}): ${e.message}`, 6000); }
+        setStatus(`${side.toUpperCase()}の標準PDF注釈を作成できませんでした。元PDFの互換性を確認してください。`, 6000);
+        continue;
       }
-      if (!bytes) continue;
-      results.push({ side, native, bytes });
+      results.push({ side, native: true, bytes });
       if (download) {
         const base = (side === 'a' ? state.nameA : state.nameB).replace(/\.pdf$/i, '') || side.toUpperCase();
         downloadBlob(new Blob([bytes], { type: 'application/pdf' }), `${base}_注釈入り.pdf`);
@@ -1581,11 +1661,10 @@ async function saveAnnotatedPDF(opts = {}) {
     }
   }
   if (results.length) {
-    setStatus(nativeFailed
-      ? '注釈入りPDFを保存しました(一部はインク注釈形式)。'
-      : '注釈入りPDFを保存しました。Acrobatで長方形/円/線/テキストとして編集できます。', 6000);
-  } else if (annotCount('a') === 0 && annotCount('b') === 0) {
-    setStatus('注釈がありません', 3000);
+    setStatus('注釈入りPDFを保存しました。Acrobatで長方形・円・線・テキストとして編集できます。', 6000);
+  } else {
+    const empty = sides.filter(side => annotCount(side) === 0).map(side => side.toUpperCase());
+    setStatus(empty.length ? `${empty.join('・')}に保存できる注釈がありません` : 'PDF注釈を保存できませんでした', 4000);
   }
   return results;
 }
@@ -1594,10 +1673,13 @@ async function saveAnnotatedPDF(opts = {}) {
 // オフセット自動位置合わせ (Worker の align op / ON・OFF トグル)
 // ─────────────────────────────────────────────────────────
 function updateAutoAlignButton() {
-  const b = $('btn-auto-align');
+  const b = btnOffsetReset;
   if (!b) return;
   b.classList.toggle('active', state.autoAlign);
   b.setAttribute('aria-pressed', String(state.autoAlign));
+  const hasOffset = Math.round(state.offsetDx) !== 0 || Math.round(state.offsetDy) !== 0;
+  b.textContent = 'リセット';
+  b.title = hasOffset ? 'オフセットを 0,0 に戻す' : 'ズレを自動推定して補正する';
 }
 
 async function autoAlignOffset() {
@@ -1823,17 +1905,13 @@ async function generateReport(opts = {}) {
       } catch { /* テキスト抽出不可は無視 */ }
 
       const pageLabel = state.pageBOffset === 0 ? `Page ${pg + 1}` : `A p${pg + 1} ↔ B p${bpg + 1}`;
-      summaryRows.push(`<tr><td>${pageLabel}</td><td>${(res.count || 0).toLocaleString()}</td><td>${(res.regions || []).length}</td><td>+${tIns} / −${tDel}</td></tr>`);
-
-      const regionRows = (res.regions || []).slice(0, 12).map((r, ri) =>
-        `<tr><td>#${ri + 1}</td><td>${Math.round(r.x / scA)}, ${Math.round(r.y / scA)}</td><td>${Math.round(r.w / scA)} × ${Math.round(r.h / scA)} pt</td></tr>`).join('');
+      summaryRows.push(`<tr><td>${pageLabel}</td><td>${(res.count || 0).toLocaleString()}px</td><td>+${tIns} / −${tDel}</td></tr>`);
 
       sections.push(`
 <section class="page-section">
   <h2>${pageLabel} <small>差分 ${(res.count || 0).toLocaleString()}px / ${(res.regions || []).length}領域${(tIns || tDel) ? ` / テキスト +${tIns}字 −${tDel}字` : ''}</small></h2>
   <img src="${dataURL}" alt="${pageLabel} ハイライト差分">
-  ${regionRows ? `<table class="regions"><thead><tr><th>領域</th><th>位置(pt)</th><th>サイズ</th></tr></thead><tbody>${regionRows}</tbody></table>` : ''}
-  ${(tIns || tDel) ? `<div class="textdiff">${textHtml}</div>` : ''}
+  ${(tIns || tDel) ? `<details class="textdiff"><summary>テキスト差分を表示（+${tIns}字 / −${tDel}字）</summary><div>${textHtml}</div></details>` : ''}
 </section>`);
 
       await new Promise(r => setTimeout(r, 0));
@@ -1857,7 +1935,9 @@ th{background:#f0f4ff;}
 .meta td:first-child{background:#f6f6f6;font-weight:600;}
 .page-section{margin:28px 0;padding-top:12px;border-top:1px dashed #bbb;page-break-inside:avoid;}
 .page-section img{max-width:100%;border:1px solid #ddd;border-radius:4px;}
-.textdiff{white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.8;border:1px solid #ddd;border-radius:6px;padding:10px 14px;margin-top:8px;background:#fafafa;}
+.textdiff{font-size:12px;line-height:1.8;border:1px solid #ddd;border-radius:6px;margin-top:8px;background:#fafafa;}
+.textdiff summary{cursor:pointer;padding:8px 12px;color:#245ca6;font-weight:600;}
+.textdiff>div{white-space:pre-wrap;word-break:break-word;padding:0 12px 10px;}
 ins{background:#d2f8d2;text-decoration:none;border-radius:2px;}
 del{background:#ffd9d9;border-radius:2px;}
 .skip{color:#999;font-size:11px;}
@@ -1877,7 +1957,7 @@ del{background:#ffd9d9;border-radius:2px;}
 </table>
 <p class="legend">凡例: <i style="background:#ff4b00"></i>B側のみ(追加) <i style="background:#00c4ff"></i>A側のみ(削除) — 一致部分は暗く表示</p>
 <h2 style="margin-top:20px;">サマリー</h2>
-<table><thead><tr><th>ページ</th><th>差分px</th><th>領域数</th><th>テキスト</th></tr></thead><tbody>${summaryRows.join('')}</tbody></table>
+<table><thead><tr><th>ページ</th><th>画像差分</th><th>テキスト</th></tr></thead><tbody>${summaryRows.join('')}</tbody></table>
 ${sections.join('\n')}
 </body></html>`;
 
@@ -1888,6 +1968,75 @@ ${sections.join('\n')}
     setStatus(`検版レポートを保存しました(${pages.length}ページ)。開いて「印刷/PDF保存」でPDF化できます。`, 8000);
   }
   return html;
+}
+
+// PDFレポート: 先頭に概要、以降は差分ページを1ページずつ配置する。日本語は
+// ブラウザのCanvasで描いて画像化するため、PDF標準フォントの文字化けを避ける。
+async function generatePdfReport() {
+  if (!state.docA || !state.docB || typeof PDFLib === 'undefined') {
+    setStatus('PDFレポートの生成にはA・B両方のPDFが必要です', 4000); return null;
+  }
+  const pages = [...new Set([...state.diffPages, ...state.textDiffPages])]
+    .filter(p => p >= 0 && p < state.totalA && bPageFor(p) >= 0 && bPageFor(p) < state.totalB)
+    .sort((x, y) => x - y);
+  if (!pages.length) { setStatus('差分ページがありません(先にスキャンを完了してください)', 4000); return null; }
+  if (pages.length > 50 && !window.confirm(`PDFレポートは ${pages.length + 1}ページになります。生成を続行しますか？`)) return null;
+
+  const makeTextImage = (title, lines) => {
+    const c = document.createElement('canvas'); c.width = 1600; c.height = 210;
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#1d4ed8'; ctx.fillRect(0, 0, 18, c.height);
+    ctx.fillStyle = '#172033'; ctx.font = 'bold 44px -apple-system, "Hiragino Sans", sans-serif'; ctx.fillText(title, 56, 68);
+    ctx.fillStyle = '#4b5563'; ctx.font = '27px -apple-system, "Hiragino Sans", sans-serif';
+    lines.forEach((line, i) => ctx.fillText(line, 58, 118 + i * 38));
+    const url = c.toDataURL('image/png'); c.width = 0; c.height = 0; return url;
+  };
+  const pdf = await PDFLib.PDFDocument.create();
+  const pageSize = [842, 595];
+  const now = new Date();
+  busyShow();
+  try {
+    const cover = pdf.addPage(pageSize);
+    const coverImg = await pdf.embedPng(makeTextImage('SABUN 検版レポート', [
+      `A: ${state.nameA}  /  B: ${state.nameB}`,
+      `差分ページ: ${pages.length}  /  感度: ${{ high: '高', mid: '標準', low: '低' }[state.sensitivity]}  /  ${now.toLocaleString('ja-JP')}`,
+    ]));
+    cover.drawImage(coverImg, { x: 28, y: 470, width: 786, height: 103 });
+
+    for (let i = 0; i < pages.length; i++) {
+      const pg = pages[i], bpg = bPageFor(pg);
+      const started = performance.now();
+      setStatus(`PDFレポート生成中... ${i + 1} / ${pages.length} (${runtimeMemoryNote()})`);
+      const pA = await state.docA.getPage(pg + 1);
+      const scA = clampScaleForPage(pA, 1.0);
+      const imgA = await renderPageData(pA, scA, false);
+      const pB = await state.docB.getPage(bpg + 1);
+      const scB = clampScaleForPage(pB, 1.0);
+      const imgB0 = await renderPageData(pB, scB, false);
+      const imgB = alignBToA({ img: imgB0, scale: scB }, { img: imgA, scale: scA });
+      const res = await computeDiffImage('highlight', imgA, imgB);
+      const c = document.createElement('canvas'); c.width = res.img.width; c.height = res.img.height;
+      c.getContext('2d').putImageData(res.img, 0, 0);
+      const diffUrl = c.toDataURL('image/jpeg', 0.82); c.width = 0; c.height = 0;
+      const reportPage = pdf.addPage(pageSize);
+      const header = await pdf.embedPng(makeTextImage(`差分ページ ${i + 1} / ${pages.length}`, [`A p${pg + 1}  ↔  B p${bpg + 1}   /   差分 ${(res.count || 0).toLocaleString()}px   /   処理 ${((performance.now() - started) / 1000).toFixed(1)}秒`]));
+      reportPage.drawImage(header, { x: 22, y: 470, width: 798, height: 105 });
+      const image = await pdf.embedJpg(diffUrl);
+      const fit = image.scaleToFit(798, 440);
+      reportPage.drawImage(image, { x: (842 - fit.width) / 2, y: 18 + (440 - fit.height) / 2, width: fit.width, height: fit.height });
+      try { pA.cleanup(); pB.cleanup(); } catch { /* ignore */ }
+      await new Promise(r => setTimeout(r, 0));
+    }
+    const bytes = await pdf.save({ useObjectStreams: true });
+    const pad = n => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    downloadBlob(new Blob([bytes], { type: 'application/pdf' }), `sabun_検版レポート_${stamp}.pdf`);
+    setStatus(`PDFレポートを保存しました（概要1ページ + 差分${pages.length}ページ）。`, 8000);
+    return bytes;
+  } finally {
+    busyHide();
+    releasePdfWorkingSet();
+  }
 }
 
 // 注釈マウス操作 (戻り値: イベントを消費したか)
@@ -2155,6 +2304,7 @@ window.addEventListener('mouseup', e => {
     state.offsetDragStart = null;
     clearOffsetPreview();
     renderCurrentView();
+    scheduleDiffRescan();
   } else {
     state.offsetDragStart = null;
   }
@@ -2189,10 +2339,24 @@ viewContainer.addEventListener('wheel', e => {
 const SUB_TAB_KEYS = ['a', 'b', 'highlight', 'aori', 'absdiff', 'split'];
 
 let _nudgeTimer = null;
+let _rescanTimer = null;
+
+// 感度・オフセットの変更後、一覧とレポートが古い判定条件のまま残らない
+// ようにする。連続する矢印キーやドラッグ中はまとめて一度だけ再スキャンする。
+function scheduleDiffRescan(delay = 600) {
+  if (!state.docA || !state.docB) return;
+  if (_rescanTimer) clearTimeout(_rescanTimer);
+  _rescanTimer = setTimeout(() => {
+    _rescanTimer = null;
+    startDiffScan();
+  }, delay);
+}
+
 function nudgeOffsetRender() {
   updateOffsetLabel();
   if (_nudgeTimer) clearTimeout(_nudgeTimer);
   _nudgeTimer = setTimeout(() => { _nudgeTimer = null; renderCurrentView(); }, 150);
+  scheduleDiffRescan();
 }
 
 document.addEventListener('keydown', e => {
@@ -2246,8 +2410,19 @@ document.addEventListener('keydown', e => {
   if (ctrl && (e.key === 'v' || e.key === 'V') && _annotClipboard && annotBar && !annotBar.hidden) {
     e.preventDefault();
     const c = _annotClipboard;
-    const s = { ...c.shape, id: annotIdSeq++, x1: c.shape.x1 + 12, x2: c.shape.x2 + 12, y1: c.shape.y1 - 12, y2: c.shape.y2 - 12 };
-    annotListFor(c.side, annotPage(c.side), true).push(s);
+    const list = annotListFor(c.side, annotPage(c.side), true);
+    const s = { ...c.shape, id: annotIdSeq++ };
+    // 最初の貼り付けはコピー元と同一座標。既に貼り付けた同一形状と重なる時だけ
+    // 少しずつずらすので、位置を正確に複製しつつ重なりによる見失いも防ぐ。
+    const samePlacement = item => item.id !== c.shape.id && item.type === s.type &&
+      Math.abs(item.x1 - s.x1) < 0.01 && Math.abs(item.y1 - s.y1) < 0.01 &&
+      Math.abs(item.x2 - s.x2) < 0.01 && Math.abs(item.y2 - s.y2) < 0.01;
+    let nudge = 0;
+    while (list.some(samePlacement) && nudge < 20) {
+      s.x1 += 12; s.x2 += 12; s.y1 -= 12; s.y2 -= 12;
+      nudge++;
+    }
+    list.push(s);
     state.selectedAnnot = s;
     if (state.annotTool !== 'select') selectAnnotTool('select');
     drawAnnotsOverlay();
@@ -2451,6 +2626,8 @@ function updateOpenChip(side) {
 // ─────────────────────────────────────────────────────────
 const thumbObservers = { a: null, b: null };
 const thumbURLs = { a: [], b: [] };
+const thumbEntries = { a: new Map(), b: new Map() };
+const MAX_THUMB_ENTRIES = 24;
 let _thumbChain = Promise.resolve();
 
 function buildThumbList(side) {
@@ -2460,6 +2637,7 @@ function buildThumbList(side) {
 
   thumbURLs[side].forEach(u => URL.revokeObjectURL(u));
   thumbURLs[side] = [];
+  thumbEntries[side].clear();
   if (thumbObservers[side]) { thumbObservers[side].disconnect(); thumbObservers[side] = null; }
   list.innerHTML = '';
   if (!doc) return;
@@ -2517,6 +2695,20 @@ function queueThumb(side, doc, i, itemEl) {
         const img = document.createElement('img');
         img.src = url; img.className = 'thumb-img'; img.alt = '';
         ph.replaceWith(img);
+      }
+      const entries = thumbEntries[side];
+      entries.set(i, { url, itemEl });
+      while (entries.size > MAX_THUMB_ENTRIES) {
+        const [oldPage, old] = entries.entries().next().value;
+        entries.delete(oldPage);
+        URL.revokeObjectURL(old.url);
+        const oldImg = old.itemEl.querySelector('.thumb-img');
+        if (oldImg) {
+          const placeholder = document.createElement('div');
+          placeholder.className = 'thumb-img-placeholder'; placeholder.setAttribute('aria-hidden', 'true'); placeholder.textContent = '📄';
+          oldImg.replaceWith(placeholder);
+          thumbObservers[side]?.observe(old.itemEl);
+        }
       }
     } catch { /* ignore */ }
   });
@@ -2584,18 +2776,29 @@ async function extractPageTextData(doc, idx) {
 
 async function getPageTextData(side, idx) {
   const cache = textCache[side];
-  if (cache.has(idx)) return cache.get(idx);
+  if (cache.has(idx)) {
+    const hit = cache.get(idx);
+    cache.delete(idx); cache.set(idx, hit);
+    return hit;
+  }
   const doc = side === 'a' ? state.docA : state.docB;
   const data = await extractPageTextData(doc, idx);
   cache.set(idx, data);
+  while (cache.size > MAX_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+  updateCacheLabel();
   return data;
 }
 
 async function getPageTextNorm(side, idx) {
   const cache = normTextCache[side];
-  if (cache.has(idx)) return cache.get(idx);
+  if (cache.has(idx)) {
+    const hit = cache.get(idx);
+    cache.delete(idx); cache.set(idx, hit);
+    return hit;
+  }
   const norm = (await getPageTextData(side, idx)).text.replace(/\s+/g, '');
   cache.set(idx, norm);
+  while (cache.size > MAX_NORM_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
   return norm;
 }
 
@@ -2665,11 +2868,13 @@ async function renderTextDiff(token) {
   if (textPickup) textPickup.textContent = '';
   if (!state.docA || !state.docB) {
     showTextMessage('A・B 両方のPDFを読み込むとテキスト差分を表示します。');
+    if (textPages) textPages.textContent = 'ページ未選択';
     textStats.textContent = '—';
     return;
   }
   if (!dmp) {
     showTextMessage('diff_match_patch ライブラリが読み込まれていません。');
+    if (textPages) textPages.textContent = '読み込みエラー';
     textStats.textContent = '—';
     return;
   }
@@ -2683,6 +2888,7 @@ async function renderTextDiff(token) {
   } catch (err) {
     busyHide();
     showTextMessage('テキスト抽出エラー: ' + ((err && err.message) || err));
+    if (textPages) textPages.textContent = '抽出エラー';
     textStats.textContent = '—';
     return;
   }
@@ -2690,9 +2896,10 @@ async function renderTextDiff(token) {
   if (token !== _textToken || !state.textPanelOpen) return;
 
   const pageLabel = `A:p${state.pageA + 1} ↔ B:p${state.pageB + 1}`;
+  if (textPages) textPages.textContent = pageLabel;
   if (!da.text.trim() && !db.text.trim()) {
     showTextMessage('このページにはテキストがありません(画像のみのPDFの可能性があります)。');
-    textStats.textContent = `${pageLabel} — テキストなし`;
+    textStats.textContent = 'テキストなし（画像のみのPDFの可能性）';
     return;
   }
 
@@ -2802,8 +3009,8 @@ async function renderTextDiff(token) {
     del: items.filter(i => i.type === 'del').length,
   };
   textStats.textContent = (ins === 0 && del === 0)
-    ? `${pageLabel} — テキスト差分なし`
-    : `${pageLabel} — 変更${counts.change}件 / 追加${counts.ins}件 / 削除${counts.del}件 (+${ins}字 −${del}字)`;
+    ? 'テキスト差分なし'
+    : `変更 ${counts.change}件 · 追加 ${counts.ins}件 · 削除 ${counts.del}件（+${ins}字 −${del}字）`;
 }
 
 // 差分テキストのクリック → PDFビューの該当箇所へズーム
@@ -2881,8 +3088,7 @@ del{background:#ffd9d9;border-radius:2px;}
 // ─────────────────────────────────────────────────────────
 let _scanToken = 0;
 
-async function scanComparePixels(ia, ib) {
-  const threshold = SCAN_GRAY_THRESHOLDS[state.sensitivity];
+async function scanComparePixels(ia, ib, threshold = SCAN_GRAY_THRESHOLDS[state.sensitivity], minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity]) {
   const w = ensureWorker();
   if (w) {
     const id = ++_wseq;
@@ -2890,14 +3096,21 @@ async function scanComparePixels(ia, ib) {
     try {
       const m = await new Promise((resolve, reject) => {
         _wpending.set(id, { resolve, reject });
-        w.postMessage({ id, op: 'compare', width: ia.width, height: ia.height, a, b, params: { threshold, minPx: 0 } }, [a, b]);
+        w.postMessage({ id, op: 'compare', width: ia.width, height: ia.height, a, b, params: {
+          threshold,
+          minPx: 0,
+          minBlockPixels,
+          // 全ページスキャンでは局所整列用の大きな作業バッファを作らない。
+          // 手動/自動の全体オフセットは事前に alignBToA で反映済み。
+          localAlign: false,
+        } }, [a, b]);
       });
       return m.diff;
     } catch {
       return null;
     }
   }
-  return hasDiffSync(ia, ib, threshold, 0);
+  return hasDiffSync(ia, ib, threshold, 0, minBlockPixels);
 }
 
 async function startDiffScan() {
@@ -2912,6 +3125,7 @@ async function startDiffScan() {
   const endI = Math.min(state.totalA, state.totalB - off);
   const total = Math.max(0, endI - startI);
   const maxTotal = Math.max(state.totalA, state.totalB);
+  const scanStartedAt = performance.now();
 
   btnDiffList.disabled = false;
 
@@ -2921,45 +3135,68 @@ async function startDiffScan() {
     return;
   }
 
-  setStatus('全自動スキャン中...');
+  setStatus('二段階スキャン: 候補ページを抽出中...');
   scanProgress.style.width = '0%';
   const hasOffset = Math.round(state.offsetDx) !== 0 || Math.round(state.offsetDy) !== 0;
+  const candidates = new Set();
 
+  // 第1段階: 0.5xでページをふるいに掛ける。テキストはここで必ず照合するため、
+  // 極小文字の変更を粗い画像比較だけで見落とさない。
   for (let i = startI; i < endI; i++) {
     if (token !== _scanToken) return;
     try {
-      let ia = await scanRenderPage(state.docA, i);
-      if (token !== _scanToken) return;
-      let ib = await scanRenderPage(state.docB, bPageFor(i));
-      if (token !== _scanToken) return;
-
+      let ia = await scanRenderPage(state.docA, i, SCAN_COARSE_SCALE, true);
+      let ib = await scanRenderPage(state.docB, bPageFor(i), SCAN_COARSE_SCALE, true);
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
-        ib = alignBToA({ img: ib, scale: 1 }, { img: ia, scale: 1 });
+        ib = alignBToA({ img: ib, scale: SCAN_COARSE_SCALE }, { img: ia, scale: SCAN_COARSE_SCALE });
       }
-
-      let diff = await scanComparePixels(ia, ib);
-      if (diff === null) {
-        ia = await scanRenderPage(state.docA, i);
-        ib = await scanRenderPage(state.docB, i);
-        if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
-          ib = alignBToA({ img: ib, scale: 1 }, { img: ia, scale: 1 });
-        }
-        diff = hasDiffSync(ia, ib, SCAN_GRAY_THRESHOLDS[state.sensitivity], 0);
-      }
-      if (diff) state.diffPages.add(i);
+      const coarse = await scanComparePixels(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], MIN_DIFF_BLOCK_PIXELS[state.sensitivity]);
+      if (coarse === null
+        ? hasDiffSync(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], 0, MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
+        : coarse) candidates.add(i);
     } catch {
-      state.diffPages.add(i);
+      // 描画不能ページは第2段階に回し、最終的に差分として報告する。
+      candidates.add(i);
     }
 
     try {
       const [na, nb] = await Promise.all([getPageTextNorm('a', i), getPageTextNorm('b', bPageFor(i))]);
       if (token !== _scanToken) return;
-      if (na !== nb) state.textDiffPages.add(i);
+      if (na !== nb) { state.textDiffPages.add(i); candidates.add(i); }
     } catch { /* ignore */ }
 
     if (token !== _scanToken) return;
-    scanProgress.style.width = Math.round((i - startI + 1) / total * 100) + '%';
-    setStatus(`スキャン中... ${i - startI + 1} / ${total}  (画像差分: ${state.diffPages.size} / テキスト差分: ${state.textDiffPages.size})`);
+    scanProgress.style.width = Math.round((i - startI + 1) / total * 55) + '%';
+    const done = i - startI + 1;
+    const avg = (performance.now() - scanStartedAt) / done;
+    setStatus(`第1段階: ${done} / ${total} (候補: ${candidates.size} / テキスト差分: ${state.textDiffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  // 第2段階: 候補ページだけを1xで再比較して確定。通常はここが全ページに及ばない。
+  const candidateList = [...candidates].sort((a, b) => a - b);
+  for (let n = 0; n < candidateList.length; n++) {
+    const i = candidateList[n];
+    if (token !== _scanToken) return;
+    try {
+      let ia = await scanRenderPage(state.docA, i, SCAN_FINE_SCALE, true);
+      let ib = await scanRenderPage(state.docB, bPageFor(i), SCAN_FINE_SCALE, true);
+      if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
+        ib = alignBToA({ img: ib, scale: SCAN_FINE_SCALE }, { img: ia, scale: SCAN_FINE_SCALE });
+      }
+      const fine = await scanComparePixels(ia, ib);
+      if (fine === null
+        ? hasDiffSync(ia, ib, SCAN_GRAY_THRESHOLDS[state.sensitivity], 0, MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
+        : fine) state.diffPages.add(i);
+    } catch {
+      state.diffPages.add(i);
+    }
+    if (token !== _scanToken) return;
+    const progress = 55 + Math.round((n + 1) / Math.max(1, candidateList.length) * 45);
+    scanProgress.style.width = `${progress}%`;
+    const elapsed = performance.now() - scanStartedAt;
+    const avg = elapsed / Math.max(1, total + n + 1);
+    setStatus(`第2段階: ${n + 1} / ${candidateList.length} (画像差分: ${state.diffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
     await new Promise(r => setTimeout(r, 0));
   }
   if (token !== _scanToken) return;
@@ -2970,6 +3207,7 @@ async function startDiffScan() {
   }
 
   scanProgress.style.width = '0%';
+  releasePdfWorkingSet();
   const mapNote = off !== 0 ? `(ページ対応 Δ${off > 0 ? '+' : ''}${off}) ` : '';
   const pageCountNote = mapNote + (state.totalA !== state.totalB && off === 0 ? `(ページ数不一致 A:${state.totalA} / B:${state.totalB}) ` : '');
   setStatus(`${pageCountNote}画像差分 ${state.diffPages.size}ページ / テキスト差分 ${state.textDiffPages.size}ページ`, 8000);
@@ -3239,10 +3477,12 @@ function resetOffset() {
   updateAutoAlignButton();
   clearOffsetPreview();
   if (['highlight', 'absdiff', 'aori', 'split'].includes(state.activeSubTab)) renderCurrentView();
+  scheduleDiffRescan();
 }
 function updateOffsetLabel() {
   const lbl = $('offset-label');
   if (lbl) lbl.textContent = `dx:${Math.round(state.offsetDx)}  dy:${Math.round(state.offsetDy)}`;
+  updateAutoAlignButton();
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3428,7 +3668,13 @@ $('btn-zoom-out').addEventListener('click', () => zoomCenterBy(0.8));
 $('btn-fit').addEventListener('click', fitToView);
 btnDragMode.addEventListener('click', () => setPersistentMode('drag'));
 if (btnOffsetMode) btnOffsetMode.addEventListener('click', () => setPersistentMode('offset'));
-if (btnOffsetReset) btnOffsetReset.addEventListener('click', resetOffset);
+if (btnOffsetReset) btnOffsetReset.addEventListener('click', async () => {
+  const hasOffset = Math.round(state.offsetDx) !== 0 || Math.round(state.offsetDy) !== 0;
+  if (hasOffset) { resetOffset(); return; }
+  state.autoAlignPrev = { dx: state.offsetDx, dy: state.offsetDy };
+  const ok = await autoAlignOffset();
+  if (ok) { state.autoAlign = true; updateAutoAlignButton(); scheduleDiffRescan(); }
+});
 if (btnMarqueeZoom) btnMarqueeZoom.addEventListener('click', () => setPersistentMode('marquee'));
 
 $('btn-prev').addEventListener('click', () => changePage(-1));
@@ -3559,8 +3805,9 @@ if (sensSelect) {
     state.sensitivity = sensSelect.value;
     state.lastDiffView = null;
     const labels = { high: '高(微差も検出)', mid: '標準', low: '低(ノイズ無視)' };
-    setStatus(`感度: ${labels[state.sensitivity]} — 一覧へ反映するには再スキャン(⟳)してください`, 4000);
+    setStatus(`感度: ${labels[state.sensitivity]} — 差分一覧を自動更新します`, 4000);
     renderCurrentView();
+    scheduleDiffRescan();
   });
 }
 
@@ -3609,8 +3856,18 @@ if (annotStrokeInput) {
   annotStrokeInput.addEventListener('input', () => {
     state.annotStroke = annotStrokeInput.value;
     applyStyleToSelection({ stroke: state.annotStroke });
+    document.querySelectorAll('[data-annot-color]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.annotColor.toLowerCase() === state.annotStroke.toLowerCase());
+    });
   });
 }
+document.querySelectorAll('[data-annot-color]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (!annotStrokeInput) return;
+    annotStrokeInput.value = btn.dataset.annotColor;
+    annotStrokeInput.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+});
 function currentFill() {
   return (annotFillEnable && annotFillEnable.checked) ? (annotFillInput ? annotFillInput.value : '#ffe14d') : null;
 }
@@ -3707,6 +3964,10 @@ if (btnAnnotClearAll) {
 }
 const btnAnnotSavePdf = $('btn-annot-savepdf');
 if (btnAnnotSavePdf) btnAnnotSavePdf.addEventListener('click', saveAnnotatedPDF);
+const btnAnnotSaveA = $('btn-annot-save-a');
+if (btnAnnotSaveA) btnAnnotSaveA.addEventListener('click', () => saveAnnotatedPDF({ sides: ['a'] }));
+const btnAnnotSaveB = $('btn-annot-save-b');
+if (btnAnnotSaveB) btnAnnotSaveB.addEventListener('click', () => saveAnnotatedPDF({ sides: ['b'] }));
 const btnAnnotXfdf = $('btn-annot-xfdf');
 if (btnAnnotXfdf) btnAnnotXfdf.addEventListener('click', exportXFDF);
 
@@ -3719,29 +3980,8 @@ if (btnCloseAnnotList) btnCloseAnnotList.addEventListener('click', () => toggleA
 // 検版レポート
 const btnReport = $('btn-report');
 if (btnReport) btnReport.addEventListener('click', () => generateReport());
-
-// オフセット自動位置合わせ (ON/OFF)
-const btnAutoAlign = $('btn-auto-align');
-if (btnAutoAlign) {
-  btnAutoAlign.addEventListener('click', async () => {
-    if (!state.autoAlign) {
-      state.autoAlignPrev = { dx: state.offsetDx, dy: state.offsetDy };
-      const ok = await autoAlignOffset();
-      if (ok) { state.autoAlign = true; updateAutoAlignButton(); }
-    } else {
-      state.autoAlign = false;
-      const p = state.autoAlignPrev || { dx: 0, dy: 0 };
-      state.offsetDx = p.dx;
-      state.offsetDy = p.dy;
-      updateOffsetLabel();
-      updateAutoAlignButton();
-      state.lastDiffView = null;
-      clearOffsetPreview();
-      renderCurrentView();
-      setStatus('自動位置合わせをOFF (元のオフセットに戻しました)', 3000);
-    }
-  });
-}
+const btnReportPdf = $('btn-report-pdf');
+if (btnReportPdf) btnReportPdf.addEventListener('click', () => generatePdfReport());
 
 // ページ対応マッピング
 const btnPageLink = $('btn-page-link');
@@ -3769,7 +4009,7 @@ window.addEventListener('resize', () => {
 window.__SABUN__ = {
   state, annots, buildXFDF, renderCurrentView, loadPDF,
   autoAnnotateRegions, saveAnnotatedPDF, toggleTextPanel, buildNativeAnnotatedPdf,
-  generateReport, autoAlignOffset, togglePageLink, toggleAnnotListPanel,
+  generateReport, generatePdfReport, autoAlignOffset, togglePageLink, toggleAnnotListPanel,
 };
 
 // ─────────────────────────────────────────────────────────
@@ -3867,3 +4107,4 @@ updateAutoAlignButton();
 ensureWorker();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
+    if (textPages) textPages.textContent = '抽出エラー';
