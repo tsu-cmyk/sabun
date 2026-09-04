@@ -47,10 +47,11 @@
       <span class="grow"></span>
 
       <select id="quality-select" class="tsel" title="レンダリング画質 — ズームしても差分結果は変わりません" aria-label="レンダリング画質">
-        <option value="std">画質: 標準</option>
-        <option value="high" selected>画質: 高</option>
+        <option value="std" selected>画質: 標準</option>
+        <option value="high">画質: 高</option>
       </select>
-      <button class="tbtn" id="btn-report" title="検版レポートを生成 — 全差分ページをHTMLにまとめて保存 (印刷でPDF化)">レポート</button>
+      <button class="tbtn" id="btn-report" title="簡潔な検版レポートをHTMLで保存">HTMLレポート</button>
+      <button class="tbtn" id="btn-report-pdf" title="概要と各差分ページ画像を含むPDFレポートを保存">PDFレポート</button>
       <button class="tbtn" id="btn-export" title="現在のビューを保存 (Ctrl+S) — テキストパネル表示中はHTMLレポート">保存</button>
       <button class="tbtn icon" id="btn-theme" title="テーマ切替 (ライト/ダーク)" aria-label="テーマ切替">◐</button>
       <button class="tbtn icon" id="btn-help" title="ヘルプ" aria-label="ヘルプ">?</button>
@@ -90,6 +91,16 @@
       <label class="annot-style-label" title="線の色">線
         <input type="color" id="annot-stroke" value="#ff2d2d" aria-label="線の色">
       </label>
+      <div class="annot-palette" role="group" aria-label="線の色パレット">
+        <button type="button" class="annot-swatch active" data-annot-color="#ff2d2d" style="--swatch:#ff2d2d" title="赤 (R255 G45 B45)" aria-label="赤"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#ff8a00" style="--swatch:#ff8a00" title="橙" aria-label="橙"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#ffd400" style="--swatch:#ffd400" title="黄" aria-label="黄"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#00a651" style="--swatch:#00a651" title="緑" aria-label="緑"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#00a2e8" style="--swatch:#00a2e8" title="水色" aria-label="水色"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#0000ff" style="--swatch:#0000ff" title="青 (R0 G0 B255)" aria-label="青"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#7030a0" style="--swatch:#7030a0" title="紫" aria-label="紫"></button>
+        <button type="button" class="annot-swatch" data-annot-color="#000000" style="--swatch:#000000" title="黒" aria-label="黒"></button>
+      </div>
       <label class="annot-style-label" title="塗りつぶしの有無と色">
         <input type="checkbox" id="annot-fill-enable" aria-label="塗りを有効化"> 塗り
         <input type="color" id="annot-fill" value="#ffe14d" disabled aria-label="塗りの色">
@@ -123,9 +134,11 @@
       <button class="toolbar-btn" id="btn-annot-clear" title="このページの注釈をA/B両方とも全て削除">ページ内クリア</button>
       <button class="toolbar-btn" id="btn-annot-clear-all" title="全ページの注釈をすべて削除 (確認あり)">全クリア</button>
       <div class="toolbar-sep"></div>
-      <button class="toolbar-btn" id="btn-annot-savepdf" title="「対象」のPDFに注釈を埋め込んで保存 — Acrobatで長方形/円/線/テキストとして編集できます">注釈入りPDF保存</button>
+      <button class="toolbar-btn" id="btn-annot-savepdf" title="選択した「対象」のPDFに、標準PDF注釈として埋め込んで保存">対象をPDF保存</button>
+      <button class="toolbar-btn" id="btn-annot-save-a" title="Aの注釈入りPDFを保存">Aを保存</button>
+      <button class="toolbar-btn" id="btn-annot-save-b" title="Bの注釈入りPDFを保存">Bを保存</button>
       <button class="toolbar-btn" id="btn-annot-xfdf" title="「対象」のPDFの注釈をAcrobat互換XFDFとして書き出し (Acrobat: コメント > 読み込み)">XFDF書き出し</button>
-      <span class="annot-hint">注釈は「対象」のPDFへ。保存も対象のPDFのみ。差分判定には影響しません。</span>
+      <span class="annot-hint">対象を確認して保存してください。A/Bの個別保存もできます。差分判定には影響しません。</span>
     </div>
 
     <!-- ===================== MAIN BODY ===================== -->
@@ -189,8 +202,8 @@
             <div id="highlight-controls" class="tab-controls">
               <label>感度
                 <select id="sens-select" title="差分検出の感度" aria-label="差分検出の感度">
-                  <option value="high" selected>高</option>
-                  <option value="mid">標準</option>
+                  <option value="high">高</option>
+                  <option value="mid" selected>標準</option>
                   <option value="low">低</option>
                 </select>
               </label>
@@ -263,8 +276,7 @@
                 <div class="hud-group hud-offset" role="group" aria-label="オフセット調整">
                   <span class="hud-cap">オフセット</span>
                   <button class="hud-text" id="btn-offset-mode" title="調整モード — BをA上でドラッグして位置を合わせる (矢印キーで1px)" aria-pressed="false">調整</button>
-                  <button class="hud-text" id="btn-auto-align" title="自動位置合わせ — ズレを自動推定して補正 (もう一度押すと元に戻す)" aria-pressed="false">自動</button>
-                  <button class="hud-text" id="btn-offset-reset" title="オフセットを 0,0 に戻す">リセット</button>
+                  <button class="hud-text" id="btn-offset-reset" title="未調整なら自動位置合わせ、調整済みならオフセットを0へ戻す" aria-pressed="false">リセット</button>
                   <span id="offset-label" title="現在のオフセット量 (pt)">dx:0 dy:0</span>
                 </div>
               </div>
@@ -273,10 +285,8 @@
             <!-- Annotation list panel (ドック型サイドパネル) -->
             <div id="annot-list-panel" aria-label="注釈一覧パネル" role="complementary">
               <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
-              <div class="text-view-header">
-                <strong class="text-view-title">注釈一覧</strong>
-                <span id="annot-list-count" class="panel-count"></span>
-                <span style="flex:1;"></span>
+              <div class="text-view-header panel-view-header">
+                <div class="panel-view-heading"><strong class="text-view-title">注釈一覧</strong><span id="annot-list-count" class="panel-count"></span></div>
                 <button class="panel-close-btn" id="btn-close-annot-list" aria-label="閉じる" title="閉じる">✕</button>
               </div>
               <div class="text-view-hint">クリックで該当箇所へジャンプ / ✕で削除</div>
@@ -286,10 +296,8 @@
             <!-- Diff pages panel (ドック型サイドパネル) -->
             <div id="diff-summary-panel" aria-label="差分ページ一覧パネル" role="complementary">
               <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
-              <div class="text-view-header">
-                <strong class="text-view-title">差分ページ一覧</strong>
-                <span id="diff-panel-badge" style="display:none;"></span>
-                <span style="flex:1;"></span>
+              <div class="text-view-header panel-view-header">
+                <div class="panel-view-heading"><strong class="text-view-title">差分ページ一覧</strong><span id="diff-panel-badge" style="display:none;"></span></div>
                 <button class="panel-close-btn" id="btn-close-diff-panel" aria-label="閉じる" title="閉じる (Esc)">✕</button>
               </div>
               <div class="panel-legend">
@@ -320,13 +328,15 @@
             <div id="text-view" aria-label="テキスト差分パネル" role="complementary">
               <div class="col-resizer" title="ドラッグで幅を調整" aria-hidden="true"></div>
               <div class="text-view-header">
-                <strong class="text-view-title">テキスト差分</strong>
-                <span id="text-stats" aria-live="polite">—</span>
-                <span style="flex:1;"></span>
-                <button class="toolbar-btn" id="btn-text-report" title="このページのテキスト差分をHTMLレポートとして保存">
-                  レポート保存
-                </button>
-                <button class="panel-close-btn" id="btn-close-text" aria-label="テキスト差分パネルを閉じる" title="閉じる (Esc)">✕</button>
+                <div class="text-view-heading">
+                  <strong class="text-view-title">テキスト差分</strong>
+                  <span id="text-pages" class="text-pages">—</span>
+                </div>
+                <span id="text-stats" class="text-stats" aria-live="polite">—</span>
+                <div class="text-header-actions">
+                  <button class="toolbar-btn" id="btn-text-report" title="このページのテキスト差分をHTMLレポートとして保存">レポート保存</button>
+                  <button class="panel-close-btn" id="btn-close-text" aria-label="テキスト差分パネルを閉じる" title="閉じる (Esc)">✕</button>
+                </div>
               </div>
               <div class="text-pickup-header">差分箇所一覧 <span class="text-pickup-hint">クリックでPDF上の該当箇所へズーム</span></div>
               <div id="text-pickup" role="list" aria-label="テキスト差分箇所一覧"></div>
