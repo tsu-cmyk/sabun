@@ -329,6 +329,7 @@ body {
   display: inline-block;
   width: 8px;
   height: 8px;
+  box-sizing: border-box;
   border-radius: 50%;
   background: var(--diff-badge-bg);
   margin-right: 4px;
@@ -1098,7 +1099,22 @@ kbd {
 
 /* ---------- Diff dots (text variant) ---------- */
 .diff-dot.text {
-  background: var(--accent);
+  /* テキスト差分は円ではなく菱形にする。選択中の青背景でも、
+     色だけに頼らず画像差分（橙の円）と判別できる。 */
+  background: #2563eb;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
+.thumb-item.active .diff-dot {
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.45);
+}
+
+.thumb-item.active .diff-dot.text {
+  background: transparent;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.7);
 }
 
 /* ---------- Diff panel legend ---------- */
@@ -1180,8 +1196,9 @@ kbd {
 
 /* テキストタブでは右側に差分テキストを並列表示 */
 #text-view {
-  flex: 0 0 25%;
-  max-width: 25%;
+  flex: 0 1 clamp(360px, 31vw, 520px);
+  min-width: 320px;
+  max-width: 50%;
   border-left: 1px solid var(--border);
 }
 
@@ -1294,6 +1311,27 @@ kbd {
   border-radius: 4px;
   background: var(--bg-panel);
   cursor: pointer;
+}
+
+.annot-palette {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.annot-swatch {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--swatch), #000 35%);
+  border-radius: 50%;
+  background: var(--swatch);
+  cursor: pointer;
+}
+
+.annot-swatch.active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 #annot-bar input[type=color]:disabled {
@@ -1487,6 +1525,31 @@ kbd {
   color: var(--text-primary);
 }
 
+/* 注釈・差分一覧は「見出し＋件数」と閉じる操作だけの二列に固定する。
+   汎用テキストヘッダーの3列グリッドを使うと、件数バッジが余白を占有して
+   閉じるボタンが次行へ送られるため、専用構造に分ける。 */
+.panel-view-header {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center;
+}
+
+.panel-view-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.panel-view-heading .text-view-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-view-heading #diff-panel-badge {
+  margin-left: 0;
+}
+
 /* ---------- テキスト差分パネル (独立パネル) ---------- */
 .text-view-title {
   font-size: 12px;
@@ -1497,9 +1560,40 @@ kbd {
 }
 
 .text-view-header {
-  gap: 10px;
+  display: grid;
+  grid-template-columns: minmax(118px, auto) minmax(0, 1fr) auto;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-toolbar);
+}
+
+.text-view-heading,
+.text-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.text-pages {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.text-stats {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 800px) {
+  #text-view { min-width: 290px; }
+  .text-view-header { grid-template-columns: 1fr auto; }
+  .text-stats { grid-column: 1 / -1; grid-row: 2; }
 }
 
 .text-pickup-header {
@@ -2062,8 +2156,12 @@ kbd {
   padding: 5px 10px;
   z-index: 40;
   box-shadow: var(--shadow-md);
+  /* HUD全体を幅内に収め、足りない場合は機能グループ単位で次行へ送る。
+     個々のボタンを途中で切るより、操作の意味を保ったまま表示できる。 */
+  width: min(960px, calc(100% - 28px));
   max-width: calc(100% - 28px);
-  flex-wrap: nowrap;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 .hud-btn {
@@ -2147,9 +2245,7 @@ kbd {
 
 /* ---------- ステージ背景に奥行き ---------- */
 .view-container {
-  background:
-    radial-gradient(1100px 540px at 28% -8%, var(--accent-soft), transparent 60%),
-    var(--bg-diff);
+  background: var(--bg-diff);
 }
 
 /* ---------- モーダル: 背面ぼかし ---------- */
@@ -2234,6 +2330,28 @@ kbd {
 }
 .hud-offset .hud-text { height: 24px; padding: 0 8px; }
 .hud-offset #offset-label { margin-left: 2px; }
+
+/* 狭い比較ビューでは区切り線をなくし、グループを2段以上に安全に配置する。 */
+@media (max-width: 900px) {
+  #viewer-hud {
+    width: calc(100% - 16px);
+    max-width: calc(100% - 16px);
+    bottom: 8px;
+    gap: 4px 6px;
+    padding: 5px 8px;
+    border-radius: 16px;
+  }
+  #viewer-hud .hud-sep { display: none; }
+  #viewer-hud .hud-group { flex-shrink: 0; }
+}
+
+@media (max-width: 560px) {
+  #viewer-hud { gap: 3px 4px; }
+  .hud-text { font-size: 10.5px; padding: 0 7px; }
+  .hud-offset { padding-left: 9px; padding-right: 7px; }
+  .hud-offset .hud-text { padding: 0 6px; }
+  #viewer-hud #offset-label { min-width: 58px; font-size: 9px; }
+}
 
 /* トップバーの画質セレクタ */
 .tsel {
