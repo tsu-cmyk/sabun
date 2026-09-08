@@ -2396,3 +2396,92 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 .comparison-nav-group .ctrl-btn { min-height:30px; font-size:12px; padding:5px 8px; }
 #diff-position, #region-position { font-size:12px; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
 .diff-kind-label { margin-left:auto; font-size:12px; color:var(--text-secondary); }
+
+/* Preview-first layout: two top rows, one bottom status row. */
+:root { --sidebar-w:148px; }
+#app { height:100dvh; }
+#toolbar { height:48px; min-height:48px; padding:5px 10px; gap:6px; flex-wrap:nowrap; overflow:visible; }
+#toolbar .brand { flex-shrink:0; }
+#toolbar .tbtn, #toolbar summary { padding:6px 9px; }
+#toolbar .chip { max-width:195px; padding-right:9px; }
+#toolbar .top-sep { margin:0 3px; }
+#sidebar { width:var(--sidebar-w); }
+#app.pages-collapsed #sidebar { display:none; }
+.sidebar-header { padding:8px 10px; }
+.sidebar-filename { padding-left:10px; padding-right:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.thumb-list { padding:8px; }
+.thumb-item { padding:7px 4px; }
+#image-sub-tab-bar { position:relative; flex-wrap:nowrap; gap:3px; padding:5px 8px; min-height:42px; height:42px; overflow:visible; z-index:60; }
+#image-sub-tab-bar > .tab-btn { flex-shrink:0; padding:6px 9px; margin:0; font-size:12px; }
+#comparison-navigation { display:flex; flex-wrap:nowrap; flex:0 1 auto; margin-left:auto; padding:0; border:0; gap:12px; background:none; min-width:0; }
+.comparison-nav-group { flex-wrap:nowrap; gap:3px; white-space:nowrap; }
+.comparison-nav-group .ctrl-btn { padding:2px 7px; min-height:28px; font-size:18px; line-height:1; }
+#diff-position, #region-position { font-size:12px; white-space:nowrap; }
+.compact-menu { position:relative; flex-shrink:0; font-size:12px; }
+.compact-menu > summary { cursor:pointer; list-style:none; white-space:nowrap; padding:6px 9px; border:1px solid var(--border); border-radius:6px; background:var(--bg-panel); color:var(--text-primary); }
+.compact-menu > summary::-webkit-details-marker { display:none; }
+.compact-menu > summary::after { content:' ▾'; color:var(--text-muted); }
+.compact-menu[open] > summary { border-color:var(--accent); }
+.compact-menu-body { position:absolute; right:0; top:calc(100% + 6px); width:280px; max-width:calc(100vw - 24px); padding:14px; border:1px solid var(--border); border-radius:9px; background:var(--bg-panel); box-shadow:var(--shadow-md); z-index:200; color:var(--text-primary); }
+#export-menu { z-index:200; }
+#export-menu .compact-menu-body { width:200px; }
+#export-menu button { width:100%; margin:4px 0; justify-content:flex-start; }
+#statusbar { height:30px; min-height:30px; padding:3px 10px; gap:12px; overflow:hidden; }
+#workflow-bar { display:flex; flex:0 1 auto; flex-wrap:nowrap; padding:0; min-height:0; border:0; gap:8px; background:none; min-width:0; }
+#workflow-message { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#btn-open-missing { display:none; } /* Main file buttons and empty state already provide this action. */
+#scan-controls { margin:0; flex-wrap:nowrap; gap:8px; white-space:nowrap; }
+#scan-controls:not([hidden]) ~ * { display:none; }
+#workflow-bar:has(#scan-controls:not([hidden])) #workflow-message { display:none; }
+#scan-label { font-size:12px; }
+#scan-meter { width:70px; }
+#btn-scan-pause { padding:2px 7px; font-size:12px; }
+#status-msg { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#status-cache { margin-left:auto; white-space:nowrap; font-size:11px; }
+#view-row { position:relative; min-width:0; }
+#view-container { min-width:0; }
+#diff-summary-panel, #annot-list-panel { flex:0 0 clamp(220px,var(--panel-size,260px),32vw); width:auto; min-width:0; max-width:38%; }
+#text-view { flex:0 0 clamp(260px,var(--panel-size,320px),36vw); width:auto; min-width:0; max-width:40%; }
+#text-view .text-view-header { flex-wrap:wrap; }
+#diff-summary-panel #region-list-wrap { flex-basis:160px; }
+#annot-bar { max-height:26vh; overflow:auto; }
+#viewer-hud { max-width:calc(100% - 16px); }
+@media(max-width:1440px) {
+ :root { --sidebar-w:132px; }
+ #image-sub-tab-bar .tab-btn kbd { display:none; }
+ #toolbar .brand-sub { display:none; }
+ #toolbar .chip { max-width:175px; }
+}
+@media(max-width:1100px) {
+ #toolbar { gap:4px; padding:5px 6px; }
+ #toolbar .brand { font-size:15px; margin-right:4px; }
+ #toolbar .chip { max-width:155px; }
+ #toolbar .top-sep { display:none; }
+ #comparison-navigation { gap:5px; }
+ #image-sub-tab-bar > .tab-btn { padding:6px; }
+ #status-cache { display:none; }
+}
+@media(max-width:900px) {
+ #diff-summary-panel, #text-view, #annot-list-panel { position:absolute; top:0; bottom:0; right:0; z-index:70; width:min(var(--panel-size,300px),85vw); min-width:0; max-width:85vw; box-shadow:-6px 0 20px #0003; }
+ #sidebar { width:108px; }
+ #toolbar .chip-name { display:none; }
+ #toolbar .chip { padding:4px; }
+ #toolbar .brand { font-size:13px; }
+ #image-sub-tab-bar { height:auto; min-height:42px; flex-wrap:wrap; }
+ #comparison-navigation { margin-left:4px; }
+}
+@media(max-height:700px) { #viewer-hud { bottom:8px; padding:5px; } .view-placeholder svg { width:40px; height:40px; } }
+
+.mode-tabs { display:flex; gap:3px; flex-shrink:0; }
+#image-sub-tab-bar .mode-tabs .tab-btn { flex-shrink:0; padding:6px 9px; margin:0; font-size:12px; }
+@media(max-width:1100px) { #image-sub-tab-bar .mode-tabs .tab-btn { padding:6px; } }
+/* Direct access to comparison controls, with no extra toolbar row. */
+#inline-comparison-controls { display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; overflow-x:auto; scrollbar-width:thin; }
+#inline-comparison-controls .tab-controls { flex-shrink:0; margin:0; padding:0 5px; border:0; gap:6px; font-size:12px; white-space:nowrap; }
+#inline-comparison-controls select { font-size:12px; }
+#inline-comparison-controls #diff-pixel-label { max-width:100px; overflow:hidden; text-overflow:ellipsis; }
+#comparison-navigation { flex-shrink:0; }
+#viewer-hud .hud-offset { display:flex; }
+#toolbar #quality-select { display:block; flex-shrink:0; font-size:12px; max-width:110px; }
+@media(max-width:1100px) { #comparison-navigation { gap:3px; } #inline-comparison-controls { gap:3px; } }
+
