@@ -1834,6 +1834,7 @@ function toggleAnnotListPanel(force = null) {
   const panel = $('annot-list-panel');
   if (!panel) return;
   const open = force !== null ? force : !panel.classList.contains('visible');
+  if (open) closeOtherInspectors('annotations');
   panel.classList.toggle('visible', open);
   const b = $('btn-annot-list');
   if (b) { b.classList.toggle('active', open); b.setAttribute('aria-pressed', String(open)); }
@@ -2947,6 +2948,7 @@ let _textToken = 0;
 
 function toggleTextPanel(forceOpen = null) {
   const open = forceOpen !== null ? forceOpen : !state.textPanelOpen;
+  if (open) closeOtherInspectors('text');
   state.textPanelOpen = open;
   showTextView(open);
   if (btnTextPanel) {
@@ -3776,13 +3778,13 @@ function updateComparisonNavigation() {
   const sorted = [...allDiffPages()].sort((a, b) => a - b);
   const index = sorted.indexOf(currentComparisonPage());
   const ready = state.scanStatus === 'complete';
-  label.textContent = !state.docA || !state.docB ? '差分ページ —'
-    : !ready ? (state.scanStatus === 'paused' ? '比較を一時停止中' : '全ページを比較中…')
+  label.textContent = !state.docA || !state.docB ? '差分 —'
+    : !ready ? (state.scanStatus === 'paused' ? '一時停止中' : '比較中…')
     : !sorted.length ? (state.scanErrors.size ? '読み取り失敗あり' : '差分ページなし')
-    : `差分ページ ${index >= 0 ? index + 1 : '—'} / ${sorted.length}`;
+    : `差分 ${index >= 0 ? index + 1 : '—'} / ${sorted.length}`;
   for (const id of ['btn-view-diff-prev', 'btn-view-diff-next']) $(id).disabled = !sorted.length;
   const regions = DIFF_TABS.includes(state.activeSubTab) && state.regions ? state.regions.list : [];
-  $('region-position').textContent = `このページの領域 ${state.regionIdx >= 0 && regions.length ? state.regionIdx + 1 : '—'} / ${regions.length}`;
+  $('region-position').textContent = `領域 ${state.regionIdx >= 0 && regions.length ? state.regionIdx + 1 : '—'} / ${regions.length}`;
   for (const id of ['btn-view-region-prev', 'btn-view-region-next']) $(id).disabled = !regions.length;
 }
 
@@ -3796,9 +3798,30 @@ function jumpToDiff(dir) {
   goToPage(target); rebuildDiffSummaryPanel();
 }
 
+function closeOtherInspectors(keep) {
+  if (keep !== 'text') {
+    state.textPanelOpen = false;
+    showTextView(false);
+    btnTextPanel.classList.remove('active');
+    btnTextPanel.setAttribute('aria-pressed', 'false');
+  }
+  if (keep !== 'diff') {
+    diffPanel.classList.remove('visible');
+    btnDiffList.setAttribute('aria-pressed', 'false');
+  }
+  if (keep !== 'annotations') {
+    $('annot-list-panel').classList.remove('visible');
+    $('btn-annot-list').classList.remove('active');
+    $('btn-annot-list').setAttribute('aria-pressed', 'false');
+  }
+}
+
 function toggleDiffPanel() {
   if (!state.docA && !state.docB) return;
-  diffPanel.classList.toggle('visible');
+  const open = !diffPanel.classList.contains('visible');
+  if (open) closeOtherInspectors('diff');
+  diffPanel.classList.toggle('visible', open);
+  btnDiffList.setAttribute('aria-pressed', String(open));
   if (diffPanel.classList.contains('visible')) { rebuildDiffSummaryPanel(); updateRegionList(); }
 }
 
@@ -3915,7 +3938,7 @@ pageInfo.addEventListener('click', () => {
 
 $('btn-export').addEventListener('click', exportCurrentView);
 btnDiffList.addEventListener('click', toggleDiffPanel);
-$('btn-close-diff-panel').addEventListener('click', () => diffPanel.classList.remove('visible'));
+$('btn-close-diff-panel').addEventListener('click', () => { diffPanel.classList.remove('visible'); btnDiffList.setAttribute('aria-pressed', 'false'); });
 $('btn-diff-prev').addEventListener('click', () => jumpToDiff('prev'));
 $('btn-diff-next').addEventListener('click', () => jumpToDiff('next'));
 
@@ -4261,9 +4284,8 @@ function makeColResizer(handleEl, panelEl, opts = {}) {
     const startX = e.clientX;
     const startW = panelEl.getBoundingClientRect().width;
     const onMove = ev => {
-      const w = Math.max(min, Math.min(window.innerWidth * 0.7, startW + (startX - ev.clientX)));
-      panelEl.style.flex = `0 0 ${w}px`;
-      panelEl.style.maxWidth = 'none';
+      const w = Math.max(min, Math.min(420, window.innerWidth * 0.38, startW + (startX - ev.clientX)));
+      panelEl.style.setProperty('--panel-size', `${w}px`);
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -4328,3 +4350,18 @@ $('btn-view-diff-next').addEventListener('click', () => jumpToDiff('next'));
 $('btn-view-region-prev').addEventListener('click', () => navigateRegion(-1));
 $('btn-view-region-next').addEventListener('click', () => navigateRegion(1));
 updateComparisonNavigation();
+
+$('btn-pages-toggle').addEventListener('click', () => {
+  const collapsed = document.getElementById('app').classList.toggle('pages-collapsed');
+  $('btn-pages-toggle').setAttribute('aria-expanded', String(!collapsed));
+});
+for (const id of ['export-menu']) {
+  const menu = $(id);
+  menu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { menu.open = false; menu.querySelector('summary').focus(); event.stopPropagation(); }
+  });
+}
+$('export-menu').addEventListener('click', event => { if (event.target.closest('button')) $('export-menu').open = false; });
+document.addEventListener('pointerdown', event => {
+  for (const id of ['export-menu']) if (!$(id).contains(event.target)) $(id).open = false;
+});
