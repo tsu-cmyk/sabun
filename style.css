@@ -2372,3 +2372,5 @@ kbd {
   color: var(--text-muted);
   border: 1px solid var(--border);
 }
+
+.scan-summary { margin: 8px 10px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
