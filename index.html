@@ -25,6 +25,7 @@
 
     <!-- ===================== TOP BAR ===================== -->
     <header id="toolbar" role="toolbar" aria-label="メインツールバー">
+      <button class="tbtn icon" id="btn-pages-toggle" title="ページ欄を表示／非表示" aria-label="ページ欄を表示／非表示" aria-expanded="true">☰</button>
       <span class="brand">SABUN<span class="brand-sub">PDF比較</span></span>
 
       <div class="filepair" role="group" aria-label="比較ファイル">
@@ -46,13 +47,15 @@
 
       <span class="grow"></span>
 
-      <select id="quality-select" class="tsel" title="レンダリング画質 — ズームしても差分結果は変わりません" aria-label="レンダリング画質">
+
+
+
+
+<select id="quality-select" class="tsel" title="レンダリング画質 — ズームしても差分結果は変わりません" aria-label="レンダリング画質">
         <option value="std" selected>画質: 標準</option>
         <option value="high">画質: 高</option>
       </select>
-      <button class="tbtn" id="btn-report" title="簡潔な検版レポートをHTMLで保存">HTMLレポート</button>
-      <button class="tbtn" id="btn-report-pdf" title="概要と各差分ページ画像を含むPDFレポートを保存">PDFレポート</button>
-      <button class="tbtn" id="btn-export" title="現在のビューを保存 (Ctrl+S) — テキストパネル表示中はHTMLレポート">保存</button>
+      <details class="compact-menu" id="export-menu"><summary>書き出し</summary><div class="compact-menu-body" role="group" aria-label="書き出し">      <button class="tbtn" id="btn-report" title="簡潔な検版レポートをHTMLで保存">HTMLレポート</button>      <button class="tbtn" id="btn-report-pdf" title="概要と各差分ページ画像を含むPDFレポートを保存">PDFレポート</button>      <button class="tbtn" id="btn-export" title="現在のビューを保存 (Ctrl+S) — テキストパネル表示中はHTMLレポート">保存</button></div></details>
       <button class="tbtn icon" id="btn-theme" title="テーマ切替 (ライト/ダーク)" aria-label="テーマ切替">◐</button>
       <button class="tbtn icon" id="btn-help" title="ヘルプ" aria-label="ヘルプ">?</button>
 
@@ -61,15 +64,6 @@
       <span id="zoom-label" hidden></span>
     </header>
 
-    <div id="workflow-bar" aria-label="比較の状態">
-      <span id="workflow-message" role="status">変更前と変更後のPDFを開いてください</span>
-      <button id="btn-open-missing" class="tbtn">変更前のPDFを開く</button>
-      <div id="scan-controls" hidden>
-        <span id="scan-label" role="status">未比較</span>
-        <progress id="scan-meter" max="100" value="0" aria-label="全ページ比較の進捗"></progress>
-        <button id="btn-scan-pause" class="tbtn">一時停止</button>
-      </div>
-    </div>
     <!-- ===================== ANNOTATION BAR ===================== -->
     <div id="annot-bar" role="toolbar" aria-label="注釈ツールバー" hidden>
       <span class="annot-bar-label">注釈:</span>
@@ -165,7 +159,7 @@
           </div>
           <div class="sidebar-filename" id="sidebar-filename-a">（未ロード）</div>
           <div class="sidebar-controls" style="padding:4px 10px;">
-            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-a"> PDF内の注釈を表示</label>
+            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-a"> 元の注釈を表示</label>
           </div>
           <div class="thumb-list" id="thumb-list-a" role="list" aria-label="Aのページ一覧"></div>
         </div>
@@ -182,7 +176,7 @@
           </div>
           <div class="sidebar-filename" id="sidebar-filename-b">（未ロード）</div>
           <div class="sidebar-controls" style="padding:4px 10px;">
-            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-b"> PDF内の注釈を表示</label>
+            <label style="font-size:11px;color:var(--text-muted);"><input type="checkbox" id="toggle-annotations-b"> 元の注釈を表示</label>
           </div>
           <div class="thumb-list" id="thumb-list-b" role="list" aria-label="Bのページ一覧"></div>
         </div>
@@ -193,7 +187,8 @@
         <!-- IMAGE TAB -->
         <div class="tab-panel active" id="main-tab-image">
           <!-- Sub tabs -->
-          <div class="tab-bar" id="image-sub-tab-bar" role="tablist" aria-label="比較モード">
+          <div class="tab-bar" id="image-sub-tab-bar" aria-label="比較操作">
+            <div class="mode-tabs" role="tablist" aria-label="比較モード">
             <button class="tab-btn active" role="tab" aria-selected="true" data-sub-tab="a">A <kbd>1</kbd></button>
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="b">B <kbd>2</kbd></button>
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="highlight">ハイライト <kbd>3</kbd></button>
@@ -201,7 +196,8 @@
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="absdiff">絶対値差 <kbd>5</kbd></button>
             <button class="tab-btn" role="tab" aria-selected="false" data-sub-tab="split">スプリット <kbd>6</kbd></button>
 
-            <!-- Region overlay controls (A/B以外の全タブ共通) -->
+            </div>
+            <div id="inline-comparison-controls" aria-label="比較設定"><!-- Region overlay controls (A/B以外の全タブ共通) -->
             <div id="region-controls" class="tab-controls">
               <label title="差分領域の枠を表示"><input type="checkbox" id="toggle-regions" checked> 領域枠</label>
               <span id="diff-pixel-label" aria-live="polite"></span>
@@ -236,20 +232,22 @@
             </div>
 
 
-          </div>
-
+</div>
           <div id="comparison-navigation" aria-label="差分の移動">
             <div class="comparison-nav-group" role="group" aria-label="差分ページ">
-              <button class="ctrl-btn" id="btn-view-diff-prev" title="前の差分ページ（Shift+Tab）" disabled>← 前の差分</button>
+              <button class="ctrl-btn" id="btn-view-diff-prev" aria-label="前の差分ページ" title="前の差分ページ（Shift+Tab）" disabled>‹</button>
               <span id="diff-position" role="status">差分ページ —</span>
-              <button class="ctrl-btn" id="btn-view-diff-next" title="次の差分ページ（Tab）" disabled>次の差分 →</button>
+              <button class="ctrl-btn" id="btn-view-diff-next" aria-label="次の差分ページ" title="次の差分ページ（Tab）" disabled>›</button>
             </div>
             <div class="comparison-nav-group" role="group" aria-label="差分領域">
-              <button class="ctrl-btn" id="btn-view-region-prev" title="前の領域（P）" disabled>← 前の領域</button>
+              <button class="ctrl-btn" id="btn-view-region-prev" aria-label="前の差分領域" title="前の領域（P）" disabled>‹</button>
               <span id="region-position" role="status">このページの領域 — / 0</span>
-              <button class="ctrl-btn" id="btn-view-region-next" title="次の領域（N）" disabled>次の領域 →</button>
+              <button class="ctrl-btn" id="btn-view-region-next" aria-label="次の差分領域" title="次の領域（N）" disabled>›</button>
             </div>
           </div>
+
+          </div>
+
           <!-- View row: canvas + (text diff) -->
           <div id="view-row">
             <div class="view-container" id="view-container">
@@ -295,7 +293,8 @@
                   <button class="hud-text" id="btn-marquee-zoom" title="矩形ズーム — 囲った範囲を拡大 (M / Shift+ドラッグ)" aria-pressed="false">矩形ズーム</button>
                 </div>
                 <span class="hud-sep"></span>
-                <div class="hud-group hud-offset" role="group" aria-label="オフセット調整">
+                
+<div class="hud-group hud-offset" role="group" aria-label="オフセット調整">
                   <span class="hud-cap">オフセット</span>
                   <button class="hud-text" id="btn-offset-mode" title="調整モード — BをA上でドラッグして位置を合わせる (矢印キーで1px)" aria-pressed="false">調整</button>
                   <button class="hud-text" id="btn-offset-reset" title="未調整なら自動位置合わせ、調整済みならオフセットを0へ戻す" aria-pressed="false">リセット</button>
@@ -373,6 +372,16 @@
 
     <!-- STATUS BAR -->
     <div id="statusbar">
+    <div id="workflow-bar" aria-label="比較の状態">
+      <span id="workflow-message" role="status">変更前と変更後のPDFを開いてください</span>
+      <button id="btn-open-missing" class="tbtn">変更前のPDFを開く</button>
+      <div id="scan-controls" hidden>
+        <span id="scan-label" role="status">未比較</span>
+        <progress id="scan-meter" max="100" value="0" aria-label="全ページ比較の進捗"></progress>
+        <button id="btn-scan-pause" class="tbtn">一時停止</button>
+      </div>
+    </div>
+
       <span class="status-msg" id="status-msg" aria-live="polite">SABUNへようこそ！PDFをドラッグ＆ドロップするか、A/Bボタンで開いてください。</span>
       <span id="status-cache" title="ページキャッシュ使用量"></span>
       <span class="status-zoom" id="status-zoom">100%</span>
