@@ -219,6 +219,66 @@ const btnCloseHelp = $('btn-close-help');
 const toggleAnnA = $('toggle-annotations-a');
 const toggleAnnB = $('toggle-annotations-b');
 
+// 操作待ちとバックグラウンド比較を分離するための軽量状態。
+let _activeViews = 0;
+let _viewRequestedAt = -Infinity;
+let _scanPercent = 0;
+let _scanDetail = '';
+const _loadingSides = new Set();
+const performanceStats = { pageDisplay: [], fileToView: [], fullScan: [] };
+function recordTiming(kind, started) {
+  const ms = Math.round(performance.now() - started);
+  const samples = performanceStats[kind];
+  samples.push(ms);
+  if (samples.length > 20) samples.shift();
+}
+function updateWorkflowUI() {
+  const message = $('workflow-message');
+  if (!message) return;
+  const paired = !!(state.docA && state.docB);
+  message.textContent = _loadingSides.size ? `${[..._loadingSides].map(s => s.toUpperCase()).join('・')} のPDFを読み込んでいます…`
+    : _activeViews ? '表示ページを準備しています…'
+    : paired ? 'A：変更前 ／ B：変更後 · 比較モードを選んで確認できます'
+    : state.docA ? '次に、B：変更後のPDFを開いてください'
+    : state.docB ? '次に、A：変更前のPDFを開いてください'
+    : '変更前と変更後のPDFを開いてください';
+  const open = $('btn-open-missing');
+  open.hidden = paired;
+  open.disabled = _loadingSides.size > 0;
+  open.textContent = state.docA ? 'B · 変更後を開く' : 'A · 変更前を開く';
+  $('scan-controls').hidden = !paired;
+  const active = ['running', 'paused', 'pending'].includes(state.scanStatus);
+  const pause = $('btn-scan-pause');
+  pause.hidden = !active;
+  pause.disabled = state.scanStatus === 'pending';
+  pause.textContent = state.scanStatus === 'paused' ? '続きから再開' : '一時停止';
+  $('scan-label').textContent = state.scanStatus === 'paused' ? `一時停止中 · ${_scanDetail}`
+    : state.scanStatus === 'running' ? _scanDetail
+    : state.scanStatus === 'pending' ? '比較条件を更新しています…'
+    : state.scanStatus === 'complete' ? `比較完了 · 差分 ${allDiffPages().size}ページ${state.scanErrors.size ? ` ／ 読み取り失敗 ${state.scanErrors.size}ページ` : ''}`
+    : '比較を準備しています…';
+  $('scan-meter').value = state.scanStatus === 'complete' ? 100 : _scanPercent;
+}
+function setScanProgress(label, done, total, percent) {
+  _scanDetail = `${label} ${done} / ${total}ページ`;
+  _scanPercent = percent;
+  scanProgress.style.width = `${percent}%`;
+  updateWorkflowUI();
+}
+function toggleScanPause() {
+  if (state.scanStatus === 'running') state.scanStatus = 'paused';
+  else if (state.scanStatus === 'paused') state.scanStatus = 'running';
+  else return;
+  updateDiffCountBadge();
+  rebuildDiffSummaryPanel();
+}
+async function waitForScanTurn(token) {
+  while (token === _scanToken && (state.scanStatus === 'paused' || _activeViews > 0 || performance.now() - _viewRequestedAt < 120)) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return token === _scanToken;
+}
+
 // ─────────────────────────────────────────────────────────
 // STATUS
 // ─────────────────────────────────────────────────────────
@@ -313,16 +373,18 @@ async function renderPageData(page, scale, annotations) {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
 
-  await page.render({
-    canvasContext: ctx,
-    viewport: vp,
-    annotationMode: annotations ? pdfjsLib.AnnotationMode.ENABLE : pdfjsLib.AnnotationMode.DISABLE,
-    intent: 'print',
-  }).promise;
+  try {
+    await page.render({
+      canvasContext: ctx,
+      viewport: vp,
+      annotationMode: annotations ? pdfjsLib.AnnotationMode.ENABLE : pdfjsLib.AnnotationMode.DISABLE,
+      intent: 'print',
+    }).promise;
 
-  const imgData = ctx.getImageData(0, 0, w, h);
-  canvas.width = 0; canvas.height = 0;
-  return imgData;
+    return ctx.getImageData(0, 0, w, h);
+  } finally {
+    canvas.width = 0; canvas.height = 0;
+  }
 }
 
 async function scanRenderPage(doc, pageIndex, scanScale = SCAN_FINE_SCALE, cleanupAfter = false) {
@@ -431,6 +493,9 @@ function releasePdfWorkingSet() {
  * annOverride: PDF埋め込み注釈の描画指定。null なら A/B タブの表示設定に従う。
  * 差分計算系は常に false を渡す(注釈を差分判定から除外)。
  */
+// 同じPDF・ページ・画質の進行中描画を共有する。完了後は既存のLRUへ移す。
+// WeakMapでファイル差し替え時の処理を新しいPDFから分離する。
+const pendingPageRenders = new WeakMap();
 async function getOrRender(side, idx, scale, annOverride = null) {
   const doc = side === 'a' ? state.docA : state.docB;
   const ann = annOverride !== null ? annOverride : (side === 'a' ? state.showAnnA : state.showAnnB);
@@ -438,12 +503,20 @@ async function getOrRender(side, idx, scale, annOverride = null) {
   const map = side === 'a' ? cacheA : cacheB;
   const hit = cacheGet(map, key);
   if (hit) return hit;
-  const page = await doc.getPage(idx + 1);
-  const actual = clampScaleForPage(page, scale);
-  const img = await renderPageData(page, actual, ann);
-  const entry = { img, reqScale: scale, scale: actual };
-  cacheSet(side, key, entry);
-  return entry;
+  let pending = pendingPageRenders.get(doc);
+  if (!pending) { pending = new Map(); pendingPageRenders.set(doc, pending); }
+  if (pending.has(key)) return pending.get(key);
+  const job = (async () => {
+    const page = await doc.getPage(idx + 1);
+    const actual = clampScaleForPage(page, scale);
+    const img = await renderPageData(page, actual, ann);
+    const entry = { img, reqScale: scale, scale: actual };
+    if (doc === (side === 'a' ? state.docA : state.docB)) cacheSet(side, key, entry);
+    return entry;
+  })();
+  pending.set(key, job);
+  try { return await job; }
+  finally { if (pending.get(key) === job) pending.delete(key); }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -546,7 +619,7 @@ function hasDiffSync(imgA, imgB, threshold, minPx, minBlockPixels = 5) {
 async function computeDiffImage(op, imgA, imgB) {
   const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
   const minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity];
-  const call = workerCall(op, imgA, imgB, { threshold, minBlockPixels, emphasize: state.emphasize });
+  const call = workerCall(op, imgA, imgB, { threshold, minBlockPixels, emphasize: state.emphasize, includeRegions: op === 'absdiff' });
   if (call) {
     try {
       const m = await call;
@@ -554,7 +627,7 @@ async function computeDiffImage(op, imgA, imgB) {
       return { img, count: m.count || 0, regions: m.regions || [] };
     } catch { /* 同期フォールバックへ */ }
   }
-  if (op === 'absdiff') return { img: computeAbsDiffSync(imgA, imgB), count: 0, regions: [] };
+  if (op === 'absdiff') return { img: computeAbsDiffSync(imgA, imgB), ...await computeRegionsOnly(imgA, imgB) };
   return computeHighlightSync(imgA, imgB, threshold);
 }
 
@@ -1729,7 +1802,6 @@ async function autoAlignOffset() {
 function updatePageLinkButton() {
   const b = $('btn-page-link');
   if (!b) return;
-  rebuildDiffSummaryPanel();
   const off = state.pageBOffset;
   b.textContent = off === 0 ? '対応固定' : `対応解除 Δ${off > 0 ? '+' : ''}${off}`;
   b.classList.toggle('active', off !== 0);
@@ -2353,6 +2425,7 @@ function scheduleDiffRescan(delay = 600) {
   if (!state.docA || !state.docB) return;
   ++_scanToken;
   state.scanStatus = 'pending';
+  _scanPercent = 0;
   scanProgress.style.width = '0%';
   updateDiffCountBadge();
   rebuildDiffSummaryPanel();
@@ -2371,9 +2444,15 @@ function nudgeOffsetRender() {
 }
 
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
-    state.keysDown.add(e.key); updateModeFromKeys(); return;
+  // 従来のTab／Shift+Tabを優先。入力欄では通常のフォーカス移動を維持する。
+  if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey &&
+      !e.target.closest('input, textarea, select') && !e.target.isContentEditable) {
+    e.preventDefault();
+    jumpToDiff(e.shiftKey ? 'prev' : 'next');
+    return;
   }
+
+  if (e.target.closest('input, textarea, select, button, a') || e.target.isContentEditable) return;
 
   state.keysDown.add(e.key);
   updateModeFromKeys();
@@ -2490,13 +2569,6 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  // Tab: 差分ページ順ジャンプ
-  if (e.key === 'Tab' && !ctrl && !alt) {
-    e.preventDefault();
-    jumpToDiff(e.shiftKey ? 'prev' : 'next');
-    return;
-  }
-
   // N/P: 差分領域ナビゲーション (A/B以外の全タブ)
   if (!ctrl && !alt && DIFF_TABS.includes(state.activeSubTab)) {
     if (e.key === 'n' || e.key === 'N') { e.preventDefault(); navigateRegion(1); return; }
@@ -2551,6 +2623,9 @@ async function computeFingerprint(ab) {
 const loadVersions = { a: 0, b: 0 };
 async function loadPDF(side, file) {
   const version = ++loadVersions[side];
+  const loadStarted = performance.now();
+  _loadingSides.add(side);
+  updateWorkflowUI();
   setStatus(`${side === 'a' ? 'A' : 'B'} を読込中: ${file.name}`);
   try {
     const ab = await file.arrayBuffer();
@@ -2607,14 +2682,17 @@ async function loadPDF(side, file) {
     updateOpenChip(side);
     btnDiffList.disabled = !(state.docA && state.docB);
 
+    let displayed = false;
     if (state.docA && state.docB) {
       switchSubTab('highlight', false);
-      await renderCurrentView(true);
-      startDiffScan();
+      displayed = await renderCurrentView(true);
+      if (version === loadVersions[side]) startDiffScan();
     } else {
       switchSubTab(side, false);
-      await renderCurrentView(true);
+      displayed = await renderCurrentView(true);
     }
+    if (version !== loadVersions[side]) return;
+    if (displayed) recordTiming('fileToView', loadStarted);
     refreshTextPanel();
     setStatus(`${side === 'a' ? 'A' : 'B'} 読込完了: ${file.name}`, 4000);
   } catch (err) {
@@ -2624,6 +2702,9 @@ async function loadPDF(side, file) {
       : (err && err.message) || String(err);
     setStatus(`読込エラー: ${msg}`, 6000);
     console.error(err);
+  } finally {
+    if (version === loadVersions[side]) _loadingSides.delete(side);
+    updateWorkflowUI();
   }
 }
 
@@ -2672,13 +2753,6 @@ function buildThumbList(side) {
 
   const curPage = side === 'a' ? state.pageA : state.pageB;
   const frag = document.createDocumentFragment();
-  const notice = document.createElement('p');
-  notice.className = 'scan-summary';
-  notice.setAttribute('role', 'status');
-  notice.textContent = state.scanStatus === 'complete'
-    ? (state.scanErrors.size ? `読み取り失敗: ${state.scanErrors.size}ページ。要確認のページを確認してください。` : `比較完了 · 差分 ${allDiffPages().size}ページ`)
-    : state.scanStatus === 'idle' ? 'A・BのPDFを開くと比較を開始します。' : '比較中… 完了まで差分判定は未確定です。';
-  frag.appendChild(notice);
   for (let i = 0; i < total; i++) {
     const div = document.createElement('div');
     div.className = 'thumb-item' + (i === curPage ? ' active' : '');
@@ -3144,15 +3218,19 @@ async function scanComparePixels(ia, ib, threshold = SCAN_GRAY_THRESHOLDS[state.
 
 async function startDiffScan() {
   if (!state.docA || !state.docB) return;
+  if (_rescanTimer) { clearTimeout(_rescanTimer); _rescanTimer = null; }
   const token = ++_scanToken;
   const docA = state.docA, docB = state.docB;
   state.scanStatus = 'running';
+  _scanDetail = '候補ページを調べています';
+  _scanPercent = 0;
   state.scanErrors.clear();
   scanProgress.style.width = '0%';
   state.diffPages.clear();
   state.textDiffPages.clear();
   refreshDiffBadges();
   updateDiffCountBadge();
+  rebuildDiffSummaryPanel();
   const off = state.pageBOffset;
   const startI = Math.max(0, -off);
   const endI = Math.min(state.totalA, state.totalB - off);
@@ -3164,6 +3242,7 @@ async function startDiffScan() {
 
   if (state.fpA && state.fpA === state.fpB && off === 0 && state.offsetDx === 0 && state.offsetDy === 0) {
     state.scanStatus = 'complete';
+    recordTiming('fullScan', scanStartedAt);
     setStatus('同一ファイル―差分ゼロです。', 5000);
     refreshDiffBadges(); rebuildDiffSummaryPanel(); updateDiffCountBadge();
     return;
@@ -3177,15 +3256,17 @@ async function startDiffScan() {
   // 第1段階: 0.5xでページをふるいに掛ける。テキストはここで必ず照合するため、
   // 極小文字の変更を粗い画像比較だけで見落とさない。
   for (let i = startI; i < endI; i++) {
-    if (token !== _scanToken) return;
+    if (!await waitForScanTurn(token)) return;
     try {
       let ia = await scanRenderPage(docA, i, SCAN_COARSE_SCALE, true);
       if (token !== _scanToken) return;
+      if (!await waitForScanTurn(token)) return;
       let ib = await scanRenderPage(docB, i + off, SCAN_COARSE_SCALE, true);
       if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_COARSE_SCALE }, { img: ia, scale: SCAN_COARSE_SCALE });
       }
+      if (!await waitForScanTurn(token)) return;
       const coarse = await scanComparePixels(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], MIN_DIFF_BLOCK_PIXELS[state.sensitivity]);
       if (coarse === null
         ? hasDiffSync(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], 0, MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
@@ -3203,7 +3284,7 @@ async function startDiffScan() {
     } catch { if (token === _scanToken) state.scanErrors.add(i); }
 
     if (token !== _scanToken) return;
-    scanProgress.style.width = Math.round((i - startI + 1) / total * 55) + '%';
+    setScanProgress('候補の確認', i - startI + 1, total, Math.round((i - startI + 1) / total * 55));
     const done = i - startI + 1;
     const avg = (performance.now() - scanStartedAt) / done;
     setStatus(`第1段階: ${done} / ${total} (候補: ${candidates.size} / テキスト差分: ${state.textDiffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
@@ -3214,15 +3295,17 @@ async function startDiffScan() {
   const candidateList = [...candidates].sort((a, b) => a - b);
   for (let n = 0; n < candidateList.length; n++) {
     const i = candidateList[n];
-    if (token !== _scanToken) return;
+    if (!await waitForScanTurn(token)) return;
     try {
       let ia = await scanRenderPage(docA, i, SCAN_FINE_SCALE, true);
       if (token !== _scanToken) return;
+      if (!await waitForScanTurn(token)) return;
       let ib = await scanRenderPage(docB, i + off, SCAN_FINE_SCALE, true);
       if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_FINE_SCALE }, { img: ia, scale: SCAN_FINE_SCALE });
       }
+      if (!await waitForScanTurn(token)) return;
       const fine = await scanComparePixels(ia, ib);
       if (token !== _scanToken) return;
       if (fine === null
@@ -3234,7 +3317,7 @@ async function startDiffScan() {
     }
     if (token !== _scanToken) return;
     const progress = 55 + Math.round((n + 1) / Math.max(1, candidateList.length) * 45);
-    scanProgress.style.width = `${progress}%`;
+    setScanProgress('差分の確定', n + 1, candidateList.length, progress);
     const elapsed = performance.now() - scanStartedAt;
     const avg = elapsed / Math.max(1, total + n + 1);
     setStatus(`第2段階: ${n + 1} / ${candidateList.length} (画像差分: ${state.diffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
@@ -3248,6 +3331,7 @@ async function startDiffScan() {
   }
 
   state.scanStatus = 'complete';
+  recordTiming('fullScan', scanStartedAt);
   scanProgress.style.width = '0%';
   releasePdfWorkingSet();
   const mapNote = off !== 0 ? `(ページ対応 Δ${off > 0 ? '+' : ''}${off}) ` : '';
@@ -3269,9 +3353,12 @@ function closePair() {
 }
 
 async function preparePair(imgA, imgB, rs) {
-  closePair();
-  const [bmpA, bmpB] = await Promise.all([toDrawable(imgA), toDrawable(imgB)]);
-  state.pair = { bmpA, bmpB, w: imgA.width, h: imgA.height, rs };
+  const results = await Promise.allSettled([toDrawable(imgA), toDrawable(imgB)]);
+  if (results.some(result => result.status === 'rejected')) {
+    for (const result of results) if (result.status === 'fulfilled') closeDrawable(result.value);
+    throw results.find(result => result.status === 'rejected').reason;
+  }
+  return { bmpA: results[0].value, bmpB: results[1].value, w: imgA.width, h: imgA.height, rs };
 }
 
 function drawCornerLabel(ctx, txt, side = 'left') {
@@ -3384,14 +3471,8 @@ async function renderDiffComposite(token, op, forceFit) {
     const imgB = alignBToA(eb, ea);
     busyShow();
     try {
-      // 絶対値差は画像バッファのみを返すため、領域枠は別途軽量opで計算する
-      const [imgRes, regionsRes] = await Promise.all([
-        computeDiffImage(op, ea.img, imgB),
-        op === 'highlight' ? null : computeRegionsOnly(ea.img, imgB),
-      ]);
-      const regions = op === 'highlight' ? (imgRes.regions || []) : regionsRes.regions;
-      const count = op === 'highlight' ? (imgRes.count || 0) : regionsRes.count;
-      result = { key: cacheKey, img: imgRes.img, count, regions };
+      const imgRes = await computeDiffImage(op, ea.img, imgB);
+      result = { key: cacheKey, img: imgRes.img, count: imgRes.count || 0, regions: imgRes.regions || [] };
     } finally {
       busyHide();
     }
@@ -3410,6 +3491,28 @@ async function renderDiffComposite(token, op, forceFit) {
 
 async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
+  const started = performance.now();
+  _viewRequestedAt = started;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  if (token !== _renderToken) return;
+  _activeViews++;
+  updateWorkflowUI();
+  try {
+    const displayed = await renderCurrentViewNow(token, forceFit);
+    if (displayed && token === _renderToken) {
+      recordTiming('pageDisplay', started);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    if (token === _renderToken) setStatus(`ページ表示エラー: ${error.message || error}`, 6000);
+  } finally {
+    _activeViews--;
+    updateWorkflowUI();
+  }
+}
+
+async function renderCurrentViewNow(token, forceFit) {
   const tab = state.activeSubTab;
 
   updateTabControls();
@@ -3427,15 +3530,14 @@ async function renderCurrentView(forceFit = false) {
     updateRegionList();
     displayImageData(entry.img, entry.scale);
     if (forceFit) fitToView();
-    return;
+    return true;
   }
 
   if (!state.docA || !state.docB) return showPlaceholder();
 
   if (tab === 'highlight' || tab === 'absdiff') {
     closePair();
-    await renderDiffComposite(token, tab === 'absdiff' ? 'absdiff' : 'highlight', forceFit);
-    return;
+    return renderDiffComposite(token, tab === 'absdiff' ? 'absdiff' : 'highlight', forceFit);
   }
 
   // ペアビットマップモード (あおり / スプリット)
@@ -3449,11 +3551,16 @@ async function renderCurrentView(forceFit = false) {
   if (token !== _renderToken) return;
   const imgB = alignBToA(eb, ea);
   const imgBPlain = alignBToA(ebPlain, eaPlain);
-  const [, regionsRes] = await Promise.all([
+  const [pair, regionsRes] = await Promise.all([
     preparePair(ea.img, imgB, ea.scale),
     computeRegionsOnly(eaPlain.img, imgBPlain),
   ]);
-  if (token !== _renderToken) { closePair(); return; }
+  if (token !== _renderToken) {
+    closeDrawable(pair.bmpA); closeDrawable(pair.bmpB);
+    return;
+  }
+  closePair();
+  state.pair = pair;
   state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
   state.diffPixels = regionsRes.count;
   state.regionIdx = -1;
@@ -3465,12 +3572,14 @@ async function renderCurrentView(forceFit = false) {
     compositeSplit();
   }
   if (forceFit) fitToView();
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────
 // PAGE NAVIGATION
 // ─────────────────────────────────────────────────────────
 function syncPageIndex() {
+  updateComparisonNavigation();
   updateThumbHighlight('a'); updateThumbHighlight('b');
   updateNavButtons(); updatePageInfo();
   if (diffPanel.classList.contains('visible')) rebuildDiffSummaryPanel();
@@ -3541,6 +3650,8 @@ function requireCompleteScan() {
 }
 
 function updateDiffCountBadge() {
+  updateComparisonNavigation();
+  updateWorkflowUI();
   const n = allDiffPages().size;
   const oldBadge = $('diff-count-badge');
   if (oldBadge) {
@@ -3550,7 +3661,7 @@ function updateDiffCountBadge() {
   const panelBadge = $('diff-panel-badge');
   if (panelBadge) {
     if (state.scanStatus !== 'complete' || state.scanErrors.size) {
-      panelBadge.textContent = state.scanErrors.size ? `要確認 ${state.scanErrors.size}件` : state.scanStatus === 'idle' ? '未比較' : '比較中';
+      panelBadge.textContent = state.scanErrors.size ? `要確認 ${state.scanErrors.size}件` : state.scanStatus === 'idle' ? '未比較' : state.scanStatus === 'paused' ? '一時停止' : '比較中';
       panelBadge.style.display = 'inline-block';
     } else if (n === 0) {
       panelBadge.style.display = 'none';
@@ -3568,6 +3679,13 @@ function rebuildDiffSummaryPanel() {
   const total = Math.max(state.totalA, state.totalB);
   diffList.innerHTML = '';
   const frag = document.createDocumentFragment();
+  const notice = document.createElement('p');
+  notice.className = 'scan-summary';
+  notice.setAttribute('role', 'status');
+  notice.textContent = state.scanStatus === 'complete'
+    ? (state.scanErrors.size ? `読み取り失敗: ${state.scanErrors.size}ページ。要確認のページを確認してください。` : `比較完了 · 差分 ${allDiffPages().size}ページ`)
+    : state.scanStatus === 'paused' ? '比較を一時停止中です。続きから再開できます。' : state.scanStatus === 'idle' ? 'A・BのPDFを開くと比較を開始します。' : '比較中… 完了まで差分判定は未確定です。';
+  frag.appendChild(notice);
   for (let i = 0; i < total; i++) {
     const pix = state.diffPages.has(i);
     const txt = state.textDiffPages.has(i);
@@ -3579,7 +3697,15 @@ function rebuildDiffSummaryPanel() {
     let marks = '';
     if (pix) marks += '<span class="diff-dot" title="画像差分"></span>';
     if (txt) marks += '<span class="diff-dot text" title="テキスト差分"></span>';
-    div.innerHTML = marks + `Page ${i + 1}${state.scanErrors.has(i) ? ' · 要確認' : ''}`;
+    const kinds = [];
+    if (state.pageBOffset === 0 && i >= state.totalA) kinds.push('ページ追加');
+    else if (state.pageBOffset === 0 && i >= state.totalB) kinds.push('ページ削除');
+    else { if (pix) kinds.push('画像'); if (txt) kinds.push('文字'); }
+    if (state.scanErrors.has(i)) kinds.push('読み取り失敗');
+    div.innerHTML = marks + `Page ${i + 1}`;
+    const detail = document.createElement('span');
+    detail.className = 'diff-kind-label'; detail.textContent = kinds.join('・');
+    div.appendChild(detail);
     const activate = () => { goToPage(i); rebuildDiffSummaryPanel(); };
     div.addEventListener('click', activate);
     div.addEventListener('keydown', e => {
@@ -3597,6 +3723,7 @@ function rebuildDiffSummaryPanel() {
 }
 
 function updateRegionList() {
+  updateComparisonNavigation();
   const wrap = $('region-list-wrap');
   const listEl = $('region-list');
   const cnt = $('region-count');
@@ -3618,7 +3745,7 @@ function updateRegionList() {
   }
   wrap.style.display = 'flex';
   if (resizer) resizer.style.display = 'block';
-  cnt.textContent = `${Math.min(list.length, 100)}件${list.length > 100 ? '+' : ''}`;
+  cnt.textContent = `${list.length}件${list.length > 100 ? '（一覧は先頭100件）' : ''}`;
   listEl.innerHTML = '';
   const rs = state.regions.rs;
   const frag = document.createDocumentFragment();
@@ -3639,10 +3766,30 @@ function updateRegionList() {
   listEl.appendChild(frag);
 }
 
+function currentComparisonPage() {
+  // B側にだけ存在する末尾ページでも「次へ」が同じページで止まらない。
+  return state.pageBOffset === 0 && state.pageB >= state.totalA ? state.pageB : state.pageA;
+}
+function updateComparisonNavigation() {
+  const label = $('diff-position');
+  if (!label) return;
+  const sorted = [...allDiffPages()].sort((a, b) => a - b);
+  const index = sorted.indexOf(currentComparisonPage());
+  const ready = state.scanStatus === 'complete';
+  label.textContent = !state.docA || !state.docB ? '差分ページ —'
+    : !ready ? (state.scanStatus === 'paused' ? '比較を一時停止中' : '全ページを比較中…')
+    : !sorted.length ? (state.scanErrors.size ? '読み取り失敗あり' : '差分ページなし')
+    : `差分ページ ${index >= 0 ? index + 1 : '—'} / ${sorted.length}`;
+  for (const id of ['btn-view-diff-prev', 'btn-view-diff-next']) $(id).disabled = !sorted.length;
+  const regions = DIFF_TABS.includes(state.activeSubTab) && state.regions ? state.regions.list : [];
+  $('region-position').textContent = `このページの領域 ${state.regionIdx >= 0 && regions.length ? state.regionIdx + 1 : '—'} / ${regions.length}`;
+  for (const id of ['btn-view-region-prev', 'btn-view-region-next']) $(id).disabled = !regions.length;
+}
+
 function jumpToDiff(dir) {
   const sorted = [...allDiffPages()].sort((a, b) => a - b);
   if (!sorted.length) return;
-  const cur = state.pageA;
+  const cur = currentComparisonPage();
   const target = dir === 'next'
     ? (sorted.find(p => p > cur) ?? sorted[0])
     : ([...sorted].reverse().find(p => p < cur) ?? sorted[sorted.length - 1]);
@@ -4059,6 +4206,7 @@ window.addEventListener('resize', () => {
 // テスト/拡張用フック
 window.__SABUN__ = {
   state, annots, buildXFDF, renderCurrentView, loadPDF,
+  performanceStats, startDiffScan, toggleScanPause,
   autoAnnotateRegions, saveAnnotatedPDF, toggleTextPanel, buildNativeAnnotatedPdf,
   generateReport, generatePdfReport, autoAlignOffset, togglePageLink, toggleAnnotListPanel,
 };
@@ -4158,3 +4306,25 @@ updateAutoAlignButton();
 ensureWorker();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
+
+$('btn-open-missing').addEventListener('click', () => $(state.docA ? 'file-input-b' : 'file-input-a').click());
+$('btn-start-a').addEventListener('click', () => $('file-input-a').click());
+$('btn-start-b').addEventListener('click', () => $('file-input-b').click());
+$('btn-scan-pause').addEventListener('click', toggleScanPause);
+updateWorkflowUI();
+
+$('btn-save-timings').addEventListener('click', () => {
+  downloadBlob(new Blob([JSON.stringify({
+    format: 'sabun-performance-v1', unit: 'milliseconds',
+    pageDisplay: performanceStats.pageDisplay,
+    fileToView: performanceStats.fileToView,
+    fullScan: performanceStats.fullScan,
+    note: '直近20件。描画完了までのアプリ処理時間。fullScanは一時停止・操作待ち時間を含みます。PDF名・内容は含みません。',
+  }, null, 2)], {type: 'application/json'}), 'sabun-performance.json');
+});
+
+$('btn-view-diff-prev').addEventListener('click', () => jumpToDiff('prev'));
+$('btn-view-diff-next').addEventListener('click', () => jumpToDiff('next'));
+$('btn-view-region-prev').addEventListener('click', () => navigateRegion(-1));
+$('btn-view-region-next').addEventListener('click', () => navigateRegion(1));
+updateComparisonNavigation();
