@@ -2,6 +2,7 @@
  * SABUN PWA — app.js (v2)
  **/
 
+import { ViewCache } from './lib/view-cache.mjs';
 import * as pdfjsLib from './lib/pdf.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
 
@@ -416,11 +417,19 @@ async function renderThumbBlobURL(doc, pageIndex) {
 // ─────────────────────────────────────────────────────────
 // CACHE — バイト上限ベースの LRU
 // ─────────────────────────────────────────────────────────
+const comparisonCache = new ViewCache((DEVICE_GB >= 8 ? 32 : 16) * 1024 * 1024);
+let _prefetchTimer = null;
+let _prefetchRunning = false;
+function comparisonKey(op, scale) {
+  return JSON.stringify([op, state.pageA, state.pageB, scale, state.sensitivity,
+    state.emphasize, state.offsetDx, state.offsetDy]);
+}
 const cacheA = new Map();
 const cacheB = new Map();
 const cacheBytes = { a: 0, b: 0 };
 
 function clearCache(side) {
+  comparisonCache.clear();
   (side === 'a' ? cacheA : cacheB).clear();
   cacheBytes[side] = 0;
   updateCacheLabel();
@@ -452,6 +461,7 @@ function cacheSet(side, key, entry) {
 
 // 画質変更時に旧スケールのエントリをまとめて破棄
 function evictOtherScales(keepScale) {
+  comparisonCache.clear();
   for (const [side, map] of [['a', cacheA], ['b', cacheB]]) {
     for (const [k, v] of map) {
       if (v.reqScale === keepScale) continue;
@@ -464,12 +474,12 @@ function evictOtherScales(keepScale) {
 
 function updateCacheLabel() {
   if (!statusCache) return;
-  const mb = Math.round((cacheBytes.a + cacheBytes.b) / 1048576);
+  const mb = Math.round((cacheBytes.a + cacheBytes.b + comparisonCache.bytes) / 1048576);
   const textEntries = textCache.a.size + textCache.b.size;
   const heap = performance.memory && performance.memory.usedJSHeapSize
     ? ` / JS ${Math.round(performance.memory.usedJSHeapSize / 1048576)}MB` : '';
   statusCache.textContent = `メモリ目安 ${mb}MB${heap}`;
-  statusCache.title = `SABUN画像キャッシュ: A ${Math.round(cacheBytes.a / 1048576)}MB / B ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)、テキスト詳細キャッシュ ${textEntries}ページ${heap}`;
+  statusCache.title = `SABUN画像キャッシュ: A ${Math.round(cacheBytes.a / 1048576)}MB / B ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)、比較結果 ${Math.round(comparisonCache.bytes / 1048576)}MB、テキスト詳細キャッシュ ${textEntries}ページ${heap}`;
 }
 
 function runtimeMemoryNote() {
@@ -2787,6 +2797,10 @@ function queueThumb(side, doc, i, itemEl) {
   _thumbChain = _thumbChain.then(async () => {
     const cur = side === 'a' ? state.docA : state.docB;
     if (cur !== doc || !itemEl.isConnected) return;
+    while (_activeViews || performance.now() - _viewRequestedAt < 160) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (doc !== (side === 'a' ? state.docA : state.docB) || !itemEl.isConnected) return;
+    }
     try {
       const url = await renderThumbBlobURL(doc, i);
       if (!itemEl.isConnected) { URL.revokeObjectURL(url); return; }
@@ -3454,41 +3468,56 @@ let _renderToken = 0;
 // ハイライト/絶対値差の合成と表示 (テキストタブのPDFビューとしても使用)
 async function renderDiffComposite(token, op, forceFit) {
   const visualScale = computeVisualScale();
-  const [ea, eb] = await Promise.all([
-    getOrRender('a', state.pageA, visualScale, false),
-    getOrRender('b', state.pageB, visualScale, false),
-  ]);
-  if (token !== _renderToken) return false;
-
-  const cacheKey = [
-    op, state.pageA, state.pageB, ea.scale, state.sensitivity,
-    state.emphasize ? 1 : 0,
-    Math.round(state.offsetDx * 10), Math.round(state.offsetDy * 10),
-  ].join('|');
-
-  let result;
-  if (state.lastDiffView && state.lastDiffView.key === cacheKey) {
-    result = state.lastDiffView;
-  } else {
+  const key = comparisonKey(op, visualScale);
+  let result = comparisonCache.get(key);
+  if (!result) {
+    const [ea, eb] = await Promise.all([
+      getOrRender('a', state.pageA, visualScale, false),
+      getOrRender('b', state.pageB, visualScale, false),
+    ]);
+    if (token !== _renderToken) return false;
     const imgB = alignBToA(eb, ea);
     busyShow();
     try {
       const imgRes = await computeDiffImage(op, ea.img, imgB);
-      result = { key: cacheKey, img: imgRes.img, count: imgRes.count || 0, regions: imgRes.regions || [] };
-    } finally {
-      busyHide();
-    }
+      result = { key, img: imgRes.img, count: imgRes.count || 0, regions: imgRes.regions || [], scale: ea.scale };
+    } finally { busyHide(); }
     if (token !== _renderToken) return false;
-    state.lastDiffView = result;
+    comparisonCache.set(key, result);
   }
-
-  state.regions = { list: result.regions || [], rs: ea.scale };
-  state.diffPixels = result.count || 0;
+  state.lastDiffView = result;
+  state.regions = { list: result.regions, rs: result.scale };
+  state.diffPixels = result.count;
   state.regionIdx = -1;
   updateRegionList();
-  displayImageData(result.img, ea.scale, true);
+  displayImageData(result.img, result.scale, true);
   if (forceFit) fitToView();
   return true;
+}
+
+// Warm one next page only after foreground work and scanning have settled.
+// Rendering uses the same LRU and in-flight deduplication as normal page navigation.
+function scheduleNextPageWarmup(token) {
+  if (_prefetchTimer) clearTimeout(_prefetchTimer);
+  _prefetchTimer = setTimeout(async () => {
+    _prefetchTimer = null;
+    if (token !== _renderToken || _activeViews || _prefetchRunning || state.scanStatus === 'running') return;
+    _prefetchRunning = true;
+    const a = state.pageA + 1, b = state.pageB + 1;
+    const scale = computeVisualScale();
+    const sides = state.activeSubTab === 'a' ? ['a'] : state.activeSubTab === 'b' ? ['b'] : ['a', 'b'];
+    try {
+      for (const side of sides) {
+        if (token !== _renderToken || _activeViews || state.scanStatus === 'running') return;
+        const idx = side === 'a' ? a : b;
+        const total = side === 'a' ? state.totalA : state.totalB;
+        if (idx >= total) continue;
+        const ann = ['highlight', 'absdiff'].includes(state.activeSubTab) ? false : side === 'a' ? state.showAnnA : state.showAnnB;
+        await getOrRender(side, idx, scale, ann);
+      }
+    } catch { /* speculative work must not interrupt navigation */ }
+    finally { _prefetchRunning = false; }
+  }, 400);
 }
 
 async function renderCurrentView(forceFit = false) {
@@ -3503,6 +3532,7 @@ async function renderCurrentView(forceFit = false) {
     const displayed = await renderCurrentViewNow(token, forceFit);
     if (displayed && token === _renderToken) {
       recordTiming('pageDisplay', started);
+      scheduleNextPageWarmup(token);
       return true;
     }
     return false;
@@ -3553,27 +3583,28 @@ async function renderCurrentViewNow(token, forceFit) {
   if (token !== _renderToken) return;
   const imgB = alignBToA(eb, ea);
   const imgBPlain = alignBToA(ebPlain, eaPlain);
-  const [pair, regionsRes] = await Promise.all([
-    preparePair(ea.img, imgB, ea.scale),
-    computeRegionsOnly(eaPlain.img, imgBPlain),
-  ]);
+  const pair = await preparePair(ea.img, imgB, ea.scale);
   if (token !== _renderToken) {
     closeDrawable(pair.bmpA); closeDrawable(pair.bmpB);
     return;
   }
   closePair();
   state.pair = pair;
-  state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
-  state.diffPixels = regionsRes.count;
+  state.regions = null;
+  state.diffPixels = 0;
   state.regionIdx = -1;
   updateRegionList();
-
-  if (tab === 'aori') {
-    startAori();
-  } else if (tab === 'split') {
-    compositeSplit();
-  }
+  if (tab === 'aori') startAori();
+  else if (tab === 'split') compositeSplit();
   if (forceFit) fitToView();
+  // The image is usable while region detection continues in the worker.
+  busyShow();
+  computeRegionsOnly(eaPlain.img, imgBPlain).then(regionsRes => {
+    if (token !== _renderToken) return;
+    state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
+    state.diffPixels = regionsRes.count;
+    updateRegionList();
+  }).catch(() => {}).finally(busyHide);
   return true;
 }
 
