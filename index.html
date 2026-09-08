@@ -29,10 +29,10 @@
 
       <div class="filepair" role="group" aria-label="比較ファイル">
         <button class="chip" id="btn-open-a" title="A側PDFを開く (Ctrl+A) — 左のA欄へのドロップでも読込できます">
-          <span class="chip-tag tag-a">A</span><span class="chip-name" id="open-name-a">PDFを開く</span>
+          <span class="chip-tag tag-a">A · 変更前</span><span class="chip-name" id="open-name-a">PDFを開く</span>
         </button>
         <button class="chip" id="btn-open-b" title="B側PDFを開く (Ctrl+B) — 左のB欄へのドロップでも読込できます">
-          <span class="chip-tag tag-b">B</span><span class="chip-name" id="open-name-b">PDFを開く</span>
+          <span class="chip-tag tag-b">B · 変更後</span><span class="chip-name" id="open-name-b">PDFを開く</span>
         </button>
       </div>
 
@@ -61,6 +61,15 @@
       <span id="zoom-label" hidden></span>
     </header>
 
+    <div id="workflow-bar" aria-label="比較の状態">
+      <span id="workflow-message" role="status">変更前と変更後のPDFを開いてください</span>
+      <button id="btn-open-missing" class="tbtn">変更前のPDFを開く</button>
+      <div id="scan-controls" hidden>
+        <span id="scan-label" role="status">未比較</span>
+        <progress id="scan-meter" max="100" value="0" aria-label="全ページ比較の進捗"></progress>
+        <button id="btn-scan-pause" class="tbtn">一時停止</button>
+      </div>
+    </div>
     <!-- ===================== ANNOTATION BAR ===================== -->
     <div id="annot-bar" role="toolbar" aria-label="注釈ツールバー" hidden>
       <span class="annot-bar-label">注釈:</span>
@@ -229,6 +238,18 @@
 
           </div>
 
+          <div id="comparison-navigation" aria-label="差分の移動">
+            <div class="comparison-nav-group" role="group" aria-label="差分ページ">
+              <button class="ctrl-btn" id="btn-view-diff-prev" title="前の差分ページ（Shift+Tab）" disabled>← 前の差分</button>
+              <span id="diff-position" role="status">差分ページ —</span>
+              <button class="ctrl-btn" id="btn-view-diff-next" title="次の差分ページ（Tab）" disabled>次の差分 →</button>
+            </div>
+            <div class="comparison-nav-group" role="group" aria-label="差分領域">
+              <button class="ctrl-btn" id="btn-view-region-prev" title="前の領域（P）" disabled>← 前の領域</button>
+              <span id="region-position" role="status">このページの領域 — / 0</span>
+              <button class="ctrl-btn" id="btn-view-region-next" title="次の領域（N）" disabled>次の領域 →</button>
+            </div>
+          </div>
           <!-- View row: canvas + (text diff) -->
           <div id="view-row">
             <div class="view-container" id="view-container">
@@ -242,7 +263,8 @@
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
-                <p>A / B のPDFをドロップまたはボタンで開いてください</p>
+                <p>変更前と変更後のPDFを比較します</p>
+                <div class="start-actions"><button class="tbtn" id="btn-start-a">A · 変更前を開く</button><button class="tbtn" id="btn-start-b">B · 変更後を開く</button></div>
                 <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
               </div>
               <div id="busy-indicator" role="status" aria-label="計算中"><div class="spinner"></div><span>計算中…</span></div>
@@ -468,7 +490,7 @@
           </tr>
           <tr>
             <td><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></td>
-            <td>次/前の差分ページへジャンプ</td>
+            <td>次/前の差分ページへジャンプ（入力欄では通常の移動）</td>
           </tr>
           <tr>
             <td><kbd>N</kbd> / <kbd>P</kbd></td>
@@ -499,7 +521,11 @@
             <td>任意ページへジャンプ（Enter確定 / Escキャンセル）</td>
           </tr>
         </table>
-        <h3>8. 安定動作のための設計</h3>
+        <h3>8. 処理時間の確認</h3>
+        <p>ページ表示・PDF選択から表示・全ページ比較の処理時間を各20件まで計測します。比較時間には一時停止中の時間も含まれます。</p>
+        <button class="tbtn" id="btn-save-timings">処理時間を保存（JSON）</button>
+        <p>PDF名・PDFの内容は含みません。再読み込みすると計測値はリセットされます。</p>
+        <h3>9. 安定動作のための設計</h3>
         <ul>
           <li>差分計算はWeb Workerで実行され、大きなPDFでも操作がブロックされません</li>
           <li>レンダリング解像度固定により、ズーム時の再計算が発生しません</li>
