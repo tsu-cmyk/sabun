@@ -60,6 +60,8 @@ const state = {
   nameA: '', nameB: '',
   pageA: 0, pageB: 0,
   totalA: 0, totalB: 0,
+  scanStatus: 'idle',
+  scanErrors: new Set(),
   diffPages: new Set(),
   textDiffPages: new Set(),
   fpA: null, fpB: null,
@@ -1414,6 +1416,7 @@ async function autoAnnotateRegions(scope = 'page') {
   const maxCommon = Math.min(state.totalA, state.totalB);
   let pages;
   if (scope === 'all') {
+    if (!requireCompleteScan()) return 0;
     pages = [...state.diffPages].filter(p => p < maxCommon).sort((a, b) => a - b);
     if (!pages.length) { setStatus('差分ページがありません(先にスキャンを完了してください)', 4000); return 0; }
   } else {
@@ -1726,6 +1729,7 @@ async function autoAlignOffset() {
 function updatePageLinkButton() {
   const b = $('btn-page-link');
   if (!b) return;
+  rebuildDiffSummaryPanel();
   const off = state.pageBOffset;
   b.textContent = off === 0 ? '対応固定' : `対応解除 Δ${off > 0 ? '+' : ''}${off}`;
   b.classList.toggle('active', off !== 0);
@@ -1849,6 +1853,7 @@ function updateAnnotListPanel() {
 const REPORT_SCALE = 1.5;
 
 async function generateReport(opts = {}) {
+  if (!requireCompleteScan()) return null;
   const download = opts.download !== false;
   if (!state.docA || !state.docB) { setStatus('A・B両方のPDFが必要です', 3000); return null; }
   const pages = [...new Set([...state.diffPages, ...state.textDiffPages])]
@@ -1973,6 +1978,7 @@ ${sections.join('\n')}
 // PDFレポート: 先頭に概要、以降は差分ページを1ページずつ配置する。日本語は
 // ブラウザのCanvasで描いて画像化するため、PDF標準フォントの文字化けを避ける。
 async function generatePdfReport() {
+  if (!requireCompleteScan()) return null;
   if (!state.docA || !state.docB || typeof PDFLib === 'undefined') {
     setStatus('PDFレポートの生成にはA・B両方のPDFが必要です', 4000); return null;
   }
@@ -2345,6 +2351,11 @@ let _rescanTimer = null;
 // ようにする。連続する矢印キーやドラッグ中はまとめて一度だけ再スキャンする。
 function scheduleDiffRescan(delay = 600) {
   if (!state.docA || !state.docB) return;
+  ++_scanToken;
+  state.scanStatus = 'pending';
+  scanProgress.style.width = '0%';
+  updateDiffCountBadge();
+  rebuildDiffSummaryPanel();
   if (_rescanTimer) clearTimeout(_rescanTimer);
   _rescanTimer = setTimeout(() => {
     _rescanTimer = null;
@@ -2537,13 +2548,20 @@ async function computeFingerprint(ab) {
 // ─────────────────────────────────────────────────────────
 // LOAD PDF
 // ─────────────────────────────────────────────────────────
+const loadVersions = { a: 0, b: 0 };
 async function loadPDF(side, file) {
+  const version = ++loadVersions[side];
   setStatus(`${side === 'a' ? 'A' : 'B'} を読込中: ${file.name}`);
   try {
     const ab = await file.arrayBuffer();
     const fp = await computeFingerprint(ab);
     const doc = await pdfjsLib.getDocument({ data: new Uint8Array(ab), ...PDF_LOAD_OPTS }).promise;
 
+    if (version !== loadVersions[side]) { await doc.destroy(); return; }
+    ++_scanToken;
+    state.scanStatus = 'idle';
+    state.scanErrors.clear();
+    scanProgress.style.width = '0%';
     const oldDoc = side === 'a' ? state.docA : state.docB;
     // 注釈入りPDF保存用に File 参照を保持 (バイト列は保持しないのでメモリ負担なし)
     if (side === 'a') state.fileA = file; else state.fileB = file;
@@ -2600,6 +2618,7 @@ async function loadPDF(side, file) {
     refreshTextPanel();
     setStatus(`${side === 'a' ? 'A' : 'B'} 読込完了: ${file.name}`, 4000);
   } catch (err) {
+    if (version !== loadVersions[side]) return;
     const msg = err && err.name === 'PasswordException'
       ? 'パスワード保護されたPDFは開けません'
       : (err && err.message) || String(err);
@@ -2653,6 +2672,13 @@ function buildThumbList(side) {
 
   const curPage = side === 'a' ? state.pageA : state.pageB;
   const frag = document.createDocumentFragment();
+  const notice = document.createElement('p');
+  notice.className = 'scan-summary';
+  notice.setAttribute('role', 'status');
+  notice.textContent = state.scanStatus === 'complete'
+    ? (state.scanErrors.size ? `読み取り失敗: ${state.scanErrors.size}ページ。要確認のページを確認してください。` : `比較完了 · 差分 ${allDiffPages().size}ページ`)
+    : state.scanStatus === 'idle' ? 'A・BのPDFを開くと比較を開始します。' : '比較中… 完了まで差分判定は未確定です。';
+  frag.appendChild(notice);
   for (let i = 0; i < total; i++) {
     const div = document.createElement('div');
     div.className = 'thumb-item' + (i === curPage ? ' active' : '');
@@ -2783,6 +2809,7 @@ async function getPageTextData(side, idx) {
   }
   const doc = side === 'a' ? state.docA : state.docB;
   const data = await extractPageTextData(doc, idx);
+  if (doc !== (side === 'a' ? state.docA : state.docB)) return data;
   cache.set(idx, data);
   while (cache.size > MAX_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
   updateCacheLabel();
@@ -2796,7 +2823,9 @@ async function getPageTextNorm(side, idx) {
     cache.delete(idx); cache.set(idx, hit);
     return hit;
   }
+  const doc = side === 'a' ? state.docA : state.docB;
   const norm = (await getPageTextData(side, idx)).text.replace(/\s+/g, '');
+  if (doc !== (side === 'a' ? state.docA : state.docB)) return norm;
   cache.set(idx, norm);
   while (cache.size > MAX_NORM_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
   return norm;
@@ -3116,6 +3145,10 @@ async function scanComparePixels(ia, ib, threshold = SCAN_GRAY_THRESHOLDS[state.
 async function startDiffScan() {
   if (!state.docA || !state.docB) return;
   const token = ++_scanToken;
+  const docA = state.docA, docB = state.docB;
+  state.scanStatus = 'running';
+  state.scanErrors.clear();
+  scanProgress.style.width = '0%';
   state.diffPages.clear();
   state.textDiffPages.clear();
   refreshDiffBadges();
@@ -3129,7 +3162,8 @@ async function startDiffScan() {
 
   btnDiffList.disabled = false;
 
-  if (state.fpA && state.fpA === state.fpB) {
+  if (state.fpA && state.fpA === state.fpB && off === 0 && state.offsetDx === 0 && state.offsetDy === 0) {
+    state.scanStatus = 'complete';
     setStatus('同一ファイル―差分ゼロです。', 5000);
     refreshDiffBadges(); rebuildDiffSummaryPanel(); updateDiffCountBadge();
     return;
@@ -3145,8 +3179,10 @@ async function startDiffScan() {
   for (let i = startI; i < endI; i++) {
     if (token !== _scanToken) return;
     try {
-      let ia = await scanRenderPage(state.docA, i, SCAN_COARSE_SCALE, true);
-      let ib = await scanRenderPage(state.docB, bPageFor(i), SCAN_COARSE_SCALE, true);
+      let ia = await scanRenderPage(docA, i, SCAN_COARSE_SCALE, true);
+      if (token !== _scanToken) return;
+      let ib = await scanRenderPage(docB, i + off, SCAN_COARSE_SCALE, true);
+      if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_COARSE_SCALE }, { img: ia, scale: SCAN_COARSE_SCALE });
       }
@@ -3159,11 +3195,12 @@ async function startDiffScan() {
       candidates.add(i);
     }
 
+    if (token !== _scanToken) return;
     try {
       const [na, nb] = await Promise.all([getPageTextNorm('a', i), getPageTextNorm('b', bPageFor(i))]);
       if (token !== _scanToken) return;
       if (na !== nb) { state.textDiffPages.add(i); candidates.add(i); }
-    } catch { /* ignore */ }
+    } catch { if (token === _scanToken) state.scanErrors.add(i); }
 
     if (token !== _scanToken) return;
     scanProgress.style.width = Math.round((i - startI + 1) / total * 55) + '%';
@@ -3179,17 +3216,21 @@ async function startDiffScan() {
     const i = candidateList[n];
     if (token !== _scanToken) return;
     try {
-      let ia = await scanRenderPage(state.docA, i, SCAN_FINE_SCALE, true);
-      let ib = await scanRenderPage(state.docB, bPageFor(i), SCAN_FINE_SCALE, true);
+      let ia = await scanRenderPage(docA, i, SCAN_FINE_SCALE, true);
+      if (token !== _scanToken) return;
+      let ib = await scanRenderPage(docB, i + off, SCAN_FINE_SCALE, true);
+      if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_FINE_SCALE }, { img: ia, scale: SCAN_FINE_SCALE });
       }
       const fine = await scanComparePixels(ia, ib);
+      if (token !== _scanToken) return;
       if (fine === null
         ? hasDiffSync(ia, ib, SCAN_GRAY_THRESHOLDS[state.sensitivity], 0, MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
         : fine) state.diffPages.add(i);
     } catch {
-      state.diffPages.add(i);
+      if (token !== _scanToken) return;
+      state.scanErrors.add(i);
     }
     if (token !== _scanToken) return;
     const progress = 55 + Math.round((n + 1) / Math.max(1, candidateList.length) * 45);
@@ -3206,11 +3247,12 @@ async function startDiffScan() {
     for (let i = total; i < maxTotal; i++) state.diffPages.add(i);
   }
 
+  state.scanStatus = 'complete';
   scanProgress.style.width = '0%';
   releasePdfWorkingSet();
   const mapNote = off !== 0 ? `(ページ対応 Δ${off > 0 ? '+' : ''}${off}) ` : '';
   const pageCountNote = mapNote + (state.totalA !== state.totalB && off === 0 ? `(ページ数不一致 A:${state.totalA} / B:${state.totalB}) ` : '');
-  setStatus(`${pageCountNote}画像差分 ${state.diffPages.size}ページ / テキスト差分 ${state.textDiffPages.size}ページ`, 8000);
+  setStatus(`${pageCountNote}画像差分 ${state.diffPages.size}ページ / テキスト差分 ${state.textDiffPages.size}ページ${state.scanErrors.size ? ` / 要確認 ${state.scanErrors.size}ページ（読み取り失敗）` : ''}`, 8000);
   refreshDiffBadges();
   rebuildDiffSummaryPanel();
   updateDiffCountBadge();
@@ -3492,6 +3534,12 @@ function allDiffPages() {
   return new Set([...state.diffPages, ...state.textDiffPages]);
 }
 
+function requireCompleteScan() {
+  if (state.scanStatus === 'complete' && !state.scanErrors.size) return true;
+  setStatus(state.scanErrors.size ? '読み取りに失敗したページがあります。PDFを確認して再度読み込んでください。' : '全ページの比較完了後に実行してください。', 5000);
+  return false;
+}
+
 function updateDiffCountBadge() {
   const n = allDiffPages().size;
   const oldBadge = $('diff-count-badge');
@@ -3501,7 +3549,10 @@ function updateDiffCountBadge() {
   }
   const panelBadge = $('diff-panel-badge');
   if (panelBadge) {
-    if (n === 0) {
+    if (state.scanStatus !== 'complete' || state.scanErrors.size) {
+      panelBadge.textContent = state.scanErrors.size ? `要確認 ${state.scanErrors.size}件` : state.scanStatus === 'idle' ? '未比較' : '比較中';
+      panelBadge.style.display = 'inline-block';
+    } else if (n === 0) {
       panelBadge.style.display = 'none';
     } else {
       panelBadge.textContent = `${n}件`;
@@ -3520,7 +3571,7 @@ function rebuildDiffSummaryPanel() {
   for (let i = 0; i < total; i++) {
     const pix = state.diffPages.has(i);
     const txt = state.textDiffPages.has(i);
-    if (state.diffFilterOnly && !pix && !txt) continue;
+    if (state.diffFilterOnly && !pix && !txt && !state.scanErrors.has(i)) continue;
     const div = document.createElement('div');
     div.className = `diff-summary-item${(pix || txt) ? ' has-diff' : ''}${i === state.pageA ? ' current' : ''}`;
     div.setAttribute('role', 'button');
@@ -3528,7 +3579,7 @@ function rebuildDiffSummaryPanel() {
     let marks = '';
     if (pix) marks += '<span class="diff-dot" title="画像差分"></span>';
     if (txt) marks += '<span class="diff-dot text" title="テキスト差分"></span>';
-    div.innerHTML = marks + `Page ${i + 1}`;
+    div.innerHTML = marks + `Page ${i + 1}${state.scanErrors.has(i) ? ' · 要確認' : ''}`;
     const activate = () => { goToPage(i); rebuildDiffSummaryPanel(); };
     div.addEventListener('click', activate);
     div.addEventListener('keydown', e => {
@@ -4107,4 +4158,3 @@ updateAutoAlignButton();
 ensureWorker();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
-    if (textPages) textPages.textContent = '抽出エラー';
