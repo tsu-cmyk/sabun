@@ -2,7 +2,7 @@
  * SABUN PWA — Service Worker
  * ライブラリとHTMLをキャッシュしてオフライン動作を実現
  */
-const CACHE_NAME = 'sabun-v28';
+const CACHE_NAME = 'sabun-v31';
 const PRECACHE = [
   './',
   './index.html',
@@ -203,7 +203,7 @@ const PRECACHE = [
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(PRECACHE))
+    caches.open(CACHE_NAME).then(cache => cache.addAll(PRECACHE.map(path => new Request(path, { cache: 'reload' }))))
   );
   self.skipWaiting();
 });
