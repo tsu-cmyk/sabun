@@ -333,6 +333,14 @@
                 <button class="ctrl-btn" id="btn-diff-prev" title="前の差分ページへ (Shift+Tab)">↑ 前</button>
                 <button class="ctrl-btn" id="btn-diff-next" title="次の差分ページへ (Tab)">↓ 次</button>
               </div>
+              <details class="page-pair-settings" id="page-pair-settings"><summary>ページ対応 <span>編集</span></summary>
+                <p>AごとにBのページを指定。空欄は削除、使われていないBは追加として扱います。</p>
+                <div id="page-pair-preview" aria-label="選択した対応ページの紙面"></div>
+                <div class="pair-shift-controls"><span id="page-pair-selection">行を選択</span><button id="page-pair-minus" title="選択行以降のB番号を1減らす">−1</button><button id="page-pair-plus" title="選択行以降のB番号を1増やす">＋1</button></div>
+                <div id="page-pair-rows"></div>
+                <div class="page-pair-actions"><button id="page-pair-reset">初期化</button><button id="page-pair-apply">適用して比較</button></div>
+                <p id="page-pair-note" role="status"></p>
+              </details>
               <div class="diff-summary-list" id="diff-summary-list"></div>
               <div id="diff-panel-resizer" aria-label="領域一覧の高さを調整" style="display:none;"></div>
               <div id="region-list-wrap" style="display:none;">
