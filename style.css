@@ -2485,3 +2485,29 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 #toolbar #quality-select { display:block; flex-shrink:0; font-size:12px; max-width:110px; }
 @media(max-width:1100px) { #comparison-navigation { gap:3px; } #inline-comparison-controls { gap:3px; } }
 
+/* Quiet interface chrome; comparison marks retain their semantic colors. */
+.brand {
+  background: none;
+  color: var(--text-secondary);
+  -webkit-text-fill-color: var(--text-secondary);
+  font-weight: 700;
+}
+.chip.loaded .chip-tag {
+  background: var(--bg-thumb);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.chip.loaded:hover { background: var(--bg-thumb-hover); border-color: var(--text-muted); }
+.thumb-item.active {
+  background: var(--bg-thumb-hover);
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+  box-shadow: inset 2px 0 var(--text-secondary);
+}
+.thumb-item.active .thumb-page-num { color: var(--text-primary); }
+.tab-btn.active {
+  background: var(--bg-thumb-hover);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--text-muted);
+}
+.tab-btn.active kbd { background: var(--bg-panel); color: var(--text-secondary); border-color: transparent; }
