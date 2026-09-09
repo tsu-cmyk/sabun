@@ -2511,3 +2511,9 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
   box-shadow: inset 0 0 0 1px var(--text-muted);
 }
 .tab-btn.active kbd { background: var(--bg-panel); color: var(--text-secondary); border-color: transparent; }
+
+/* At rest the HUD reveals the paper; hover and keyboard focus restore it. */
+#viewer-hud { transition: opacity .18s ease; }
+#viewer-hud.quiet:not(:hover):not(:focus-within) { opacity: 0; }
+@media (hover: none) { #viewer-hud.quiet:not(:hover):not(:focus-within) { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { #viewer-hud { transition: none; } }
