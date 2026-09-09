@@ -2517,3 +2517,28 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 #viewer-hud.quiet:not(:hover):not(:focus-within) { opacity: 0; }
 @media (hover: none) { #viewer-hud.quiet:not(:hover):not(:focus-within) { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { #viewer-hud { transition: none; } }
+
+.page-pair-settings { padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; }
+.page-pair-settings p { margin:8px 0; color:var(--text-secondary); line-height:1.6; }
+.page-pair-settings input { width:54px; background:var(--bg-panel); color:var(--text-primary); border:1px solid var(--border); }
+.page-pair-settings button { margin:4px; padding:4px; background:var(--bg-panel); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; }
+.pickup-text { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; }
+#viewer-hud #page-info { max-width:300px; white-space:normal; font-size:11px; }
+
+.page-pair-settings summary { cursor:pointer; display:flex; justify-content:space-between; font-weight:600; }
+.page-pair-settings summary span { color:var(--text-secondary); font-weight:400; }
+#page-pair-rows { max-height:240px; overflow:auto; border:1px solid var(--border); border-radius:6px; }
+.page-pair-row { display:grid; grid-template-columns:1fr 32px 70px; gap:8px; align-items:center; padding:7px 10px; border-bottom:1px solid var(--border-light); }
+.page-pair-settings .page-pair-row input { width:100%; padding:5px; border-radius:4px; }
+.page-pair-actions { display:flex; justify-content:flex-end; gap:6px; margin-top:8px; }
+.page-pair-settings .page-pair-actions button { padding:6px 10px; }
+.diff-page-label { font-variant-numeric:tabular-nums; margin-right:4px; }
+
+#page-pair-preview { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+#page-pair-preview figure { margin:0; min-width:0; height:100px; padding:6px; background:var(--bg-sidebar); border:1px solid var(--border-light); border-radius:5px; text-align:center; }
+#page-pair-preview figcaption { font-size:11px; color:var(--text-secondary); margin-bottom:4px; }
+#page-pair-preview img { width:100%; height:70px; object-fit:contain; }
+.pair-shift-controls { display:flex; align-items:center; gap:4px; margin:6px 0; }
+.pair-shift-controls span { flex:1; font-size:11px; color:var(--text-secondary); }
+.page-pair-row.selected { background:var(--bg-thumb-hover); box-shadow:inset 2px 0 var(--text-secondary); }
+.page-pair-settings .page-pair-row button { text-align:left; border:0; background:none; margin:0; padding:4px 0; }
