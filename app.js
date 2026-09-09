@@ -784,16 +784,46 @@ function zoomToImageRect(x, y, w, h, maxZoom = 8) {
 
 function zoomToRegion(r) {
   if (!state.regions) return;
-  zoomToImageRect(r.x, r.y, r.w, r.h);
+  const rs = state.renderScale || DPR;
+  const vw = viewContainer.clientWidth, vh = viewContainer.clientHeight;
+  const margin = 32;
+  const width = Math.max(1, vw - margin * 2), height = Math.max(1, vh - margin * 2);
+  // Preserve the user's scale unless the selected region cannot fit at all.
+  const z = Math.min(state.zoomFactor, width * rs / Math.max(r.w, 1), height * rs / Math.max(r.h, 1));
+  const x = r.x / rs, y = r.y / rs;
+  const w = r.w / rs, h = r.h / rs;
+  state.zoomFactor = z;
+  const left = state.panX + x * z, top = state.panY + y * z;
+  if (left < margin) state.panX += margin - left;
+  else if (left + w * z > vw - margin) state.panX -= left + w * z - (vw - margin);
+  if (top < margin) state.panY += margin - top;
+  else if (top + h * z > vh - margin) state.panY -= top + h * z - (vh - margin);
+  applyTransform();
 }
 
 // 領域ナビゲーション (前/次)
 function navigateRegion(dir) {
   if (!state.regions || !state.regions.list.length) return;
   const n = state.regions.list.length;
-  state.regionIdx = ((state.regionIdx + dir) % n + n) % n;
+  selectRegion(((state.regionIdx + dir) % n + n) % n);
+}
+
+function hitRegion(x, y) {
+  let index = -1, area = Infinity;
+  (state.regions?.list || []).forEach((r, i) => {
+    if (x >= r.x && x <= r.x+r.w && y >= r.y && y <= r.y+r.h && r.w*r.h < area) {
+      index = i; area = r.w*r.h;
+    }
+  });
+  return index;
+}
+
+function selectRegion(index, zoom = true) {
+  const n = state.regions?.list.length || 0;
+  if (index < 0 || index >= n) return;
+  state.regionIdx = index;
   const r = state.regions.list[state.regionIdx];
-  zoomToRegion(r);
+  if (zoom) zoomToRegion(r);
   updateRegionList();
   // 枠の選択色を反映するため再描画
   if (state.activeSubTab === 'highlight' || state.activeSubTab === 'absdiff') {
@@ -803,6 +833,7 @@ function navigateRegion(dir) {
   } else if (state.activeSubTab === 'split') {
     compositeSplit();
   }
+  $('region-list')?.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
   setStatus(`差分領域 ${state.regionIdx + 1} / ${n}`, 2000);
 }
 
@@ -1526,7 +1557,7 @@ async function autoAnnotateRegions(scope = 'page') {
       // 画面に表示する差分領域と、注釈として出力する矩形を必ず一致させる。
       // ここで追加統合すると、利用者が確認した範囲と提出用PDFの範囲が食い違う。
       const submissionRegions = info.regions;
-      for (const side of sides) {
+      for (const {side, idx} of jobs) {
         const shiftX = side === 'b' ? -state.offsetDx : 0;
         const shiftY = side === 'b' ? state.offsetDy : 0;
         const pageH = side === 'b' ? info.pageHB : info.pageHA;
@@ -2267,7 +2298,9 @@ function annotMouseUp() {
 // ─────────────────────────────────────────────────────────
 // MOUSE EVENTS
 // ─────────────────────────────────────────────────────────
+let regionClickStart = null;
 viewContainer.addEventListener('mousedown', e => {
+  regionClickStart = e.target === viewCanvas && e.button === 0 ? {x:e.clientX,y:e.clientY} : null;
   const mode = state.activeMode;
   const rect = viewContainer.getBoundingClientRect();
   const mouseX = e.clientX - rect.left;
@@ -2301,6 +2334,8 @@ viewContainer.addEventListener('mousedown', e => {
     });
   } else if (mode === 'cursor' && state.activeSubTab === 'split' && state.pair) {
     e.preventDefault();
+    const point = containerToImage(mouseX, mouseY);
+    if (state.showRegions && !_activeViews && hitRegion(point.ix, point.iy) >= 0) return;
     state.splitDragging = true;
     state.splitPos = Math.max(0, Math.min(1, containerToImage(mouseX, mouseY).ix / state.pair.w));
     compositeSplit();
@@ -2404,6 +2439,20 @@ window.addEventListener('mouseup', e => {
 });
 
 viewContainer.addEventListener('click', e => {
+  const start = regionClickStart;
+  regionClickStart = null;
+  if (e.target === viewCanvas && start && Math.hypot(e.clientX-start.x,e.clientY-start.y) < 4
+      && state.activeMode === 'cursor' && !state.annotTool && !state.tempModeActive
+      && state.showRegions && !_activeViews) {
+    const rect = viewContainer.getBoundingClientRect();
+    const {ix, iy} = containerToImage(e.clientX-rect.left,e.clientY-rect.top);
+    const index = hitRegion(ix, iy);
+    if (index >= 0) {
+      if (!diffPanel.classList.contains('visible')) toggleDiffPanel();
+      selectRegion(index, false);
+      return;
+    }
+  }
   // 一時モード(Ctrl+Space等)のズームクリックは注釈ツール中でも有効
   if (state.annotTool && !state.tempModeActive && state.activeMode === 'cursor') return;
   if (state.activeMode === 'zoom_in') zoomAtPoint(e.clientX, e.clientY, 1.25);
@@ -3471,6 +3520,12 @@ async function renderDiffComposite(token, op, forceFit) {
   const key = comparisonKey(op, visualScale);
   let result = comparisonCache.get(key);
   if (!result) {
+    state.regions = null;
+    state.lastDiffView = null;
+    updateRegionList();
+    // Keep the existing canvas until the comparison is complete. A plain-paper
+    // preview here causes a bright flash on every dark comparison page change.
+    setStatus(`A ${state.pageA + 1} / B ${state.pageB + 1} の比較表示を準備中…（紙面は切り替え待ち）`);
     const [ea, eb] = await Promise.all([
       getOrRender('a', state.pageA, visualScale, false),
       getOrRender('b', state.pageB, visualScale, false),
@@ -3491,6 +3546,7 @@ async function renderDiffComposite(token, op, forceFit) {
   state.regionIdx = -1;
   updateRegionList();
   displayImageData(result.img, result.scale, true);
+  setStatus('差分表示完了');
   if (forceFit) fitToView();
   return true;
 }
@@ -3506,10 +3562,12 @@ function scheduleNextPageWarmup(token) {
     const a = state.pageA + 1, b = state.pageB + 1;
     const scale = computeVisualScale();
     const sides = state.activeSubTab === 'a' ? ['a'] : state.activeSubTab === 'b' ? ['b'] : ['a', 'b'];
+    const jobs = sides.map(side => ({side, idx: side === 'a' ? a : b}));
+    if (state.activeSubTab === 'a' && state.docB) jobs.unshift({side:'b',idx:state.pageB});
+    if (state.activeSubTab === 'b' && state.docA) jobs.unshift({side:'a',idx:state.pageA});
     try {
-      for (const side of sides) {
+      for (const {side, idx} of jobs) {
         if (token !== _renderToken || _activeViews || state.scanStatus === 'running') return;
-        const idx = side === 'a' ? a : b;
         const total = side === 'a' ? state.totalA : state.totalB;
         if (idx >= total) continue;
         const ann = ['highlight', 'absdiff'].includes(state.activeSubTab) ? false : side === 'a' ? state.showAnnA : state.showAnnB;
@@ -3520,16 +3578,32 @@ function scheduleNextPageWarmup(token) {
   }, 400);
 }
 
+function hasReadySinglePage() {
+  const side = state.activeSubTab;
+  if (side !== 'a' && side !== 'b') return false;
+  const idx = side === 'a' ? state.pageA : state.pageB;
+  const ann = side === 'a' ? state.showAnnA : state.showAnnB;
+  return !!cacheGet(side === 'a' ? cacheA : cacheB, `${idx}|${computeVisualScale()}|${ann ? 1 : 0}`);
+}
+
+let _foregroundView = null;
 async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
   const started = performance.now();
   _viewRequestedAt = started;
-  await new Promise(resolve => setTimeout(resolve, 50));
+  if (!hasReadySinglePage()) await new Promise(resolve => setTimeout(resolve, 50));
   if (token !== _renderToken) return;
+  // One foreground job at a time; obsolete requests never enter PDF/Worker queues.
+  while (_foregroundView) {
+    await _foregroundView.catch(() => {});
+    if (token !== _renderToken) return false;
+  }
   _activeViews++;
   updateWorkflowUI();
+  const job = renderCurrentViewNow(token, forceFit);
+  _foregroundView = job;
   try {
-    const displayed = await renderCurrentViewNow(token, forceFit);
+    const displayed = await job;
     if (displayed && token === _renderToken) {
       recordTiming('pageDisplay', started);
       scheduleNextPageWarmup(token);
@@ -3539,6 +3613,7 @@ async function renderCurrentView(forceFit = false) {
   } catch (error) {
     if (token === _renderToken) setStatus(`ページ表示エラー: ${error.message || error}`, 6000);
   } finally {
+    if (_foregroundView === job) _foregroundView = null;
     _activeViews--;
     updateWorkflowUI();
   }
@@ -3556,11 +3631,18 @@ async function renderCurrentViewNow(token, forceFit) {
     const doc = tab === 'a' ? state.docA : state.docB;
     if (!doc) return showPlaceholder();
     closePair();
-    const entry = await getOrRender(tab, tab === 'a' ? state.pageA : state.pageB, visualScale);
+    const pageIndex = tab === 'a' ? state.pageA : state.pageB;
+    const annotations = tab === 'a' ? state.showAnnA : state.showAnnB;
+    const cached = cacheGet(tab === 'a' ? cacheA : cacheB, `${pageIndex}|${visualScale}|${annotations ? 1 : 0}`);
+    if (!cached) {
+      setStatus(`${tab.toUpperCase()} ${pageIndex + 1}ページの表示を準備中…（紙面は切り替え待ち）`);
+    }
+    const entry = cached || await getOrRender(tab, pageIndex, visualScale);
     if (token !== _renderToken) return;
     state.regions = null;
     updateRegionList();
     displayImageData(entry.img, entry.scale);
+    setStatus('ページ表示完了');
     if (forceFit) fitToView();
     return true;
   }
@@ -3599,7 +3681,7 @@ async function renderCurrentViewNow(token, forceFit) {
   if (forceFit) fitToView();
   // The image is usable while region detection continues in the worker.
   busyShow();
-  computeRegionsOnly(eaPlain.img, imgBPlain).then(regionsRes => {
+  await computeRegionsOnly(eaPlain.img, imgBPlain).then(regionsRes => {
     if (token !== _renderToken) return;
     state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
     state.diffPixels = regionsRes.count;
@@ -3782,14 +3864,18 @@ function updateRegionList() {
   listEl.innerHTML = '';
   const rs = state.regions.rs;
   const frag = document.createDocumentFragment();
-  list.slice(0, 100).forEach((r, i) => {
+  const start = state.regionIdx >= 100 ? Math.floor(state.regionIdx / 100) * 100 : 0;
+  cnt.textContent = `${list.length}件${list.length > 100 ? `（${start + 1}–${Math.min(start + 100, list.length)}件を表示）` : ''}`;
+  list.slice(start, start + 100).forEach((r, offset) => {
+    const i = start + offset;
     const item = document.createElement('div');
     item.className = 'region-item' + (i === state.regionIdx ? ' current' : '');
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
+    item.setAttribute('aria-pressed', String(i === state.regionIdx));
     item.textContent = `#${i + 1}  ${Math.round(r.w / rs)} × ${Math.round(r.h / rs)} px`;
     item.title = 'クリックで領域へズーム';
-    const activate = () => { state.regionIdx = i; zoomToRegion(r); updateRegionList(); };
+    const activate = () => { selectRegion(i); };
     item.addEventListener('click', activate);
     item.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
@@ -4396,3 +4482,22 @@ $('export-menu').addEventListener('click', event => { if (event.target.closest('
 document.addEventListener('pointerdown', event => {
   for (const id of ['export-menu']) if (!$(id).contains(event.target)) $(id).open = false;
 });
+
+
+
+// Reveal controls on approach or keyboard focus; leave the paper unobscured at rest.
+const quietHud = $('viewer-hud');
+let quietHudTimer;
+function wakeViewerHud() {
+  clearTimeout(quietHudTimer);
+  quietHud.classList.remove('quiet');
+  quietHudTimer = setTimeout(() => {
+    if (!quietHud.matches(':hover, :focus-within')) quietHud.classList.add('quiet');
+  }, 1600);
+}
+viewContainer.addEventListener('pointermove', wakeViewerHud);
+quietHud.addEventListener('pointerenter', wakeViewerHud);
+quietHud.addEventListener('pointerleave', wakeViewerHud);
+quietHud.addEventListener('focusin', wakeViewerHud);
+quietHud.addEventListener('focusout', wakeViewerHud);
+wakeViewerHud();
