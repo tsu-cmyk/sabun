@@ -109,6 +109,7 @@ const state = {
 
   // ページ対応マッピング: B = A + pageBOffset
   pageBOffset: 0,
+  pageMap: null,
 
   // オフセット自動位置合わせ
   autoAlign: false,
@@ -790,14 +791,9 @@ function zoomToRegion(r) {
   const width = Math.max(1, vw - margin * 2), height = Math.max(1, vh - margin * 2);
   // Preserve the user's scale unless the selected region cannot fit at all.
   const z = Math.min(state.zoomFactor, width * rs / Math.max(r.w, 1), height * rs / Math.max(r.h, 1));
-  const x = r.x / rs, y = r.y / rs;
-  const w = r.w / rs, h = r.h / rs;
   state.zoomFactor = z;
-  const left = state.panX + x * z, top = state.panY + y * z;
-  if (left < margin) state.panX += margin - left;
-  else if (left + w * z > vw - margin) state.panX -= left + w * z - (vw - margin);
-  if (top < margin) state.panY += margin - top;
-  else if (top + h * z > vh - margin) state.panY -= top + h * z - (vh - margin);
+  state.panX = vw / 2 - (r.x + r.w / 2) * z / rs;
+  state.panY = vh / 2 - (r.y + r.h / 2) * z / rs;
   applyTransform();
 }
 
@@ -983,7 +979,21 @@ function annotTargetSides() {
 }
 function annotPage(side) { return side === 'b' ? state.pageB : state.pageA; }
 // ページ対応マッピング: Aのページ番号に対応するBのページ番号
-function bPageFor(aIdx) { return aIdx + state.pageBOffset; }
+function bPageFor(aIdx) { return state.pageMap ? (state.pageMap[aIdx] ?? -1) : aIdx + state.pageBOffset; }
+function comparisonRows() {
+  const used = new Set();
+  const rows = Array.from({length:state.totalA}, (_,a) => {
+    const b = bPageFor(a); const valid = b >= 0 && b < state.totalB;
+    if (valid) used.add(b);
+    return {id:a, a, b:valid ? b : null};
+  });
+  for (let b=0;b<state.totalB;b++) if (!used.has(b)) {
+    const next=rows.findIndex(r=>r.b!==null && r.b>b);
+    rows.splice(next<0?rows.length:next,0,{id:state.totalA+b,a:null,b});
+  }
+  return rows;
+}
+
 // 図形をあるサイドの座標系から別サイドのPDF座標系へ変換 (オフセット補正)
 function shapeToSideSpace(s, fromSpace, side) {
   if (fromSpace === side) return { ...s, id: annotIdSeq++ };
@@ -1531,9 +1541,10 @@ async function autoAnnotateRegions(scope = 'page') {
   let pages;
   if (scope === 'all') {
     if (!requireCompleteScan()) return 0;
-    pages = [...state.diffPages].filter(p => p < maxCommon).sort((a, b) => a - b);
+    pages = [...state.diffPages].filter(p => p < state.totalA && bPageFor(p)>=0 && bPageFor(p)<state.totalB).sort((a, b) => a - b);
     if (!pages.length) { setStatus('差分ページがありません(先にスキャンを完了してください)', 4000); return 0; }
   } else {
+    if (state.pageMap && bPageFor(state.pageA)!==state.pageB) { setStatus('対応のないページには差分領域を自動付与できません。',4000);return 0; }
     pages = [state.pageA];
   }
 
@@ -1856,6 +1867,7 @@ function togglePageLink() {
     state.pageBOffset = off;
     setStatus(`ページ対応を固定: A p${state.pageA + 1} ↔ B p${state.pageB + 1} (Δ${off > 0 ? '+' : ''}${off})。この対応で再スキャンします。`, 6000);
   } else {
+    state.pageMap = null;
     state.pageBOffset = 0;
     state.pageB = Math.max(0, Math.min(state.pageA, state.totalB - 1));
     setStatus('ページ対応を解除しました。再スキャンします。', 4000);
@@ -1884,6 +1896,7 @@ function toggleAnnotListPanel(force = null) {
 
 async function jumpToAnnot(side, page, shape) {
   if (side === 'a') goToPage(page);
+  else if (state.pageMap) { const a=state.pageMap.indexOf(page);goToPage(a<0?state.totalA+page:a); }
   else goToPage(Math.max(0, Math.min(state.totalA - 1, page - state.pageBOffset)));
   await new Promise(r => setTimeout(r, 250));
   state.selectedAnnot = shape;
@@ -1968,6 +1981,9 @@ const REPORT_SCALE = 1.5;
 
 async function generateReport(opts = {}) {
   if (!requireCompleteScan()) return null;
+  if (state.pageMap && comparisonRows().some(r=>r.a===null || r.b===null)) {
+    setStatus('追加・削除ページを含む個別対応のレポート出力は未対応です。画面の一覧で確認してください。', 6000); return null;
+  }
   const download = opts.download !== false;
   if (!state.docA || !state.docB) { setStatus('A・B両方のPDFが必要です', 3000); return null; }
   const pages = [...new Set([...state.diffPages, ...state.textDiffPages])]
@@ -2023,7 +2039,7 @@ async function generateReport(opts = {}) {
         }
       } catch { /* テキスト抽出不可は無視 */ }
 
-      const pageLabel = state.pageBOffset === 0 ? `Page ${pg + 1}` : `A p${pg + 1} ↔ B p${bpg + 1}`;
+      const pageLabel = !state.pageMap && state.pageBOffset === 0 ? `Page ${pg + 1}` : `A p${pg + 1} ↔ B p${bpg + 1}`;
       summaryRows.push(`<tr><td>${pageLabel}</td><td>${(res.count || 0).toLocaleString()}px</td><td>+${tIns} / −${tDel}</td></tr>`);
 
       sections.push(`
@@ -2093,6 +2109,9 @@ ${sections.join('\n')}
 // ブラウザのCanvasで描いて画像化するため、PDF標準フォントの文字化けを避ける。
 async function generatePdfReport() {
   if (!requireCompleteScan()) return null;
+  if (state.pageMap && comparisonRows().some(r=>r.a===null || r.b===null)) {
+    setStatus('追加・削除ページを含む個別対応のレポート出力は未対応です。画面の一覧で確認してください。', 6000); return null;
+  }
   if (!state.docA || !state.docB || typeof PDFLib === 'undefined') {
     setStatus('PDFレポートの生成にはA・B両方のPDFが必要です', 4000); return null;
   }
@@ -2693,6 +2712,10 @@ async function loadPDF(side, file) {
     const doc = await pdfjsLib.getDocument({ data: new Uint8Array(ab), ...PDF_LOAD_OPTS }).promise;
 
     if (version !== loadVersions[side]) { await doc.destroy(); return; }
+    clearPairPreview();
+    _visiblePageLabel = null;
+    ++_renderToken;
+    ++_textToken;
     ++_scanToken;
     state.scanStatus = 'idle';
     state.scanErrors.clear();
@@ -2719,15 +2742,17 @@ async function loadPDF(side, file) {
       normTextCache.b.clear();
       annots.b.clear();
     }
-    if (oldDoc) { try { oldDoc.destroy(); } catch { /* ignore */ } }
+    if (oldDoc) { try { await oldDoc.destroy(); } catch { /* ignore */ } }
 
     state.diffPages.clear();
     state.textDiffPages.clear();
+    state.pageMap = null;
     state.pageBOffset = 0;
     state.autoAlign = false;
     state.autoAlignPrev = null;
     updatePageLinkButton();
     updateAutoAlignButton();
+    if ($('page-pair-settings').open) buildPagePairEditor();
     state.regions = null;
     state.regionIdx = -1;
     state.diffPixels = 0;
@@ -2829,6 +2854,7 @@ function buildThumbList(side) {
         </div>
       </div>`;
     const activate = () => {
+      if (state.pageMap) { const a = side === 'a' ? i : state.pageMap.indexOf(i); goToPage(a < 0 ? state.totalA+i : a); return; }
       if (side === 'a') state.pageA = i; else state.pageB = i;
       syncPageIndex(); renderCurrentView(true);
     };
@@ -2893,7 +2919,8 @@ function refreshDiffBadges() {
     const total = side === 'a' ? state.totalA : state.totalB;
     for (let i = 0; i < total; i++) {
       const b = document.getElementById(`badge-${side}-${i}`);
-      if (b) b.style.display = state.diffPages.has(i) ? 'inline-block' : 'none';
+      const key = state.pageMap && side === 'b' ? (state.pageMap.indexOf(i)<0 ? state.totalA+i : state.pageMap.indexOf(i)) : i;
+      if (b) b.style.display = state.diffPages.has(key) ? 'inline-block' : 'none';
     }
   });
 }
@@ -3040,6 +3067,10 @@ async function renderTextDiff(token) {
     textStats.textContent = '—';
     return;
   }
+  if (state.pageMap && bPageFor(state.pageA) !== state.pageB) {
+    showTextMessage('このページは追加・削除ページです。対応するテキスト比較はありません。');
+    textStats.textContent='対応なし'; return;
+  }
   if (!dmp) {
     showTextMessage('diff_match_patch ライブラリが読み込まれていません。');
     if (textPages) textPages.textContent = '読み込みエラー';
@@ -3055,6 +3086,7 @@ async function renderTextDiff(token) {
     ]);
   } catch (err) {
     busyHide();
+    if (token !== _textToken || !state.textPanelOpen) return;
     showTextMessage('テキスト抽出エラー: ' + ((err && err.message) || err));
     if (textPages) textPages.textContent = '抽出エラー';
     textStats.textContent = '—';
@@ -3079,7 +3111,7 @@ async function renderTextDiff(token) {
   let chunkId = 0;
   const chunks = []; // { kind:'del'|'ins', text, off, spanId }
   const frag = document.createDocumentFragment();
-  for (const d of diffs) {
+  for (const [diffIndex, d] of diffs.entries()) {
     const opn = d[0], txt = d[1];
     if (opn === 0) {
       appendEqualText(frag, txt);
@@ -3101,6 +3133,7 @@ async function renderTextDiff(token) {
         text: txt,
         off: opn === 1 ? offB : offA,
         spanId: `txd-${chunkId}`,
+        group: diffIndex,
       });
       chunkId++;
       if (opn === 1) { ins += txt.length; offB += txt.length; }
@@ -3116,7 +3149,7 @@ async function renderTextDiff(token) {
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i];
     const next = chunks[i + 1];
-    if (c.kind === 'del' && next && next.kind === 'ins') {
+    if (c.kind === 'del' && next && next.kind === 'ins' && next.group === c.group + 1) {
       items.push({ type: 'change', del: c, ins: next });
       i++;
     } else if (c.kind === 'del') {
@@ -3135,12 +3168,15 @@ async function renderTextDiff(token) {
       row.setAttribute('tabindex', '0');
       const badge = document.createElement('span');
       badge.className = `pickup-badge pk-${it.type}`;
-      badge.textContent = it.type === 'change' ? '変更' : it.type === 'ins' ? '追加' : '削除';
+      const whitespaceOnly = [it.del, it.ins].filter(Boolean).every(c => !c.text.trim());
+      badge.textContent = whitespaceOnly ? '空白・改行' : it.type === 'change' ? '変更' : it.type === 'ins' ? '追加' : '削除';
       const label = document.createElement('span');
       label.className = 'pickup-text';
       if (it.type === 'change') label.textContent = `${excerpt(it.del.text, 16)} → ${excerpt(it.ins.text, 16)}`;
       else if (it.type === 'ins') label.textContent = excerpt(it.ins.text);
       else label.textContent = excerpt(it.del.text);
+      if (it.type === 'change') label.textContent = `変更前: ${excerpt(it.del.text, 80)}\n変更後: ${excerpt(it.ins.text, 80)}`;
+      if (whitespaceOnly) label.textContent = '空白や改行の違い（文言の変更なし）';
       row.appendChild(badge);
       row.appendChild(label);
       row.title = `差分 ${i + 1}: クリックでPDF上の該当箇所へズーム`;
@@ -3297,15 +3333,14 @@ async function startDiffScan() {
   updateDiffCountBadge();
   rebuildDiffSummaryPanel();
   const off = state.pageBOffset;
-  const startI = Math.max(0, -off);
-  const endI = Math.min(state.totalA, state.totalB - off);
-  const total = Math.max(0, endI - startI);
+  const pairs = Array.from({length:state.totalA},(_,i)=>[i,bPageFor(i)]).filter(([,b])=>b>=0 && b<state.totalB);
+  const total = pairs.length;
   const maxTotal = Math.max(state.totalA, state.totalB);
   const scanStartedAt = performance.now();
 
   btnDiffList.disabled = false;
 
-  if (state.fpA && state.fpA === state.fpB && off === 0 && state.offsetDx === 0 && state.offsetDy === 0) {
+  if (state.fpA && state.fpA === state.fpB && !state.pageMap && off === 0 && state.offsetDx === 0 && state.offsetDy === 0) {
     state.scanStatus = 'complete';
     recordTiming('fullScan', scanStartedAt);
     setStatus('同一ファイル―差分ゼロです。', 5000);
@@ -3320,13 +3355,14 @@ async function startDiffScan() {
 
   // 第1段階: 0.5xでページをふるいに掛ける。テキストはここで必ず照合するため、
   // 極小文字の変更を粗い画像比較だけで見落とさない。
-  for (let i = startI; i < endI; i++) {
+  for (let pairIndex = 0; pairIndex < pairs.length; pairIndex++) {
+    const [i] = pairs[pairIndex];
     if (!await waitForScanTurn(token)) return;
     try {
       let ia = await scanRenderPage(docA, i, SCAN_COARSE_SCALE, true);
       if (token !== _scanToken) return;
       if (!await waitForScanTurn(token)) return;
-      let ib = await scanRenderPage(docB, i + off, SCAN_COARSE_SCALE, true);
+      let ib = await scanRenderPage(docB, bPageFor(i), SCAN_COARSE_SCALE, true);
       if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_COARSE_SCALE }, { img: ia, scale: SCAN_COARSE_SCALE });
@@ -3349,8 +3385,8 @@ async function startDiffScan() {
     } catch { if (token === _scanToken) state.scanErrors.add(i); }
 
     if (token !== _scanToken) return;
-    setScanProgress('候補の確認', i - startI + 1, total, Math.round((i - startI + 1) / total * 55));
-    const done = i - startI + 1;
+    setScanProgress('候補の確認', pairIndex + 1, total, Math.round((pairIndex + 1) / total * 55));
+    const done = pairIndex + 1;
     const avg = (performance.now() - scanStartedAt) / done;
     setStatus(`第1段階: ${done} / ${total} (候補: ${candidates.size} / テキスト差分: ${state.textDiffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
     await new Promise(r => setTimeout(r, 0));
@@ -3365,7 +3401,7 @@ async function startDiffScan() {
       let ia = await scanRenderPage(docA, i, SCAN_FINE_SCALE, true);
       if (token !== _scanToken) return;
       if (!await waitForScanTurn(token)) return;
-      let ib = await scanRenderPage(docB, i + off, SCAN_FINE_SCALE, true);
+      let ib = await scanRenderPage(docB, bPageFor(i), SCAN_FINE_SCALE, true);
       if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
         ib = alignBToA({ img: ib, scale: SCAN_FINE_SCALE }, { img: ia, scale: SCAN_FINE_SCALE });
@@ -3391,7 +3427,11 @@ async function startDiffScan() {
   if (token !== _scanToken) return;
 
   // ページ数不一致: マッピング未使用時のみ、はみ出しページを差分扱い
-  if (off === 0) {
+  if (state.pageMap) {
+    const used = new Set(pairs.map(([,b])=>b));
+    for(let a=0;a<state.totalA;a++) if(bPageFor(a)<0) state.diffPages.add(a);
+    for(let b=0;b<state.totalB;b++) if(!used.has(b)) state.diffPages.add(state.totalA+b);
+  } else if (off === 0) {
     for (let i = total; i < maxTotal; i++) state.diffPages.add(i);
   }
 
@@ -3586,11 +3626,13 @@ function hasReadySinglePage() {
   return !!cacheGet(side === 'a' ? cacheA : cacheB, `${idx}|${computeVisualScale()}|${ann ? 1 : 0}`);
 }
 
+let _visiblePageLabel = null;
 let _foregroundView = null;
 async function renderCurrentView(forceFit = false) {
   const token = ++_renderToken;
   const started = performance.now();
   _viewRequestedAt = started;
+  updatePageInfo();
   if (!hasReadySinglePage()) await new Promise(resolve => setTimeout(resolve, 50));
   if (token !== _renderToken) return;
   // One foreground job at a time; obsolete requests never enter PDF/Worker queues.
@@ -3605,6 +3647,8 @@ async function renderCurrentView(forceFit = false) {
   try {
     const displayed = await job;
     if (displayed && token === _renderToken) {
+      _visiblePageLabel = requestedPageLabel();
+      updatePageInfo();
       recordTiming('pageDisplay', started);
       scheduleNextPageWarmup(token);
       return true;
@@ -3649,6 +3693,10 @@ async function renderCurrentViewNow(token, forceFit) {
 
   if (!state.docA || !state.docB) return showPlaceholder();
 
+  if (state.pageMap && bPageFor(state.pageA) !== state.pageB) {
+    setStatus('対応のないページです。AまたはBで紙面を確認してください。', 5000);
+    state.regions=null; updateRegionList(); return showPlaceholder();
+  }
   if (tab === 'highlight' || tab === 'absdiff') {
     closePair();
     return renderDiffComposite(token, tab === 'absdiff' ? 'absdiff' : 'highlight', forceFit);
@@ -3699,17 +3747,35 @@ function syncPageIndex() {
   updateNavButtons(); updatePageInfo();
   if (diffPanel.classList.contains('visible')) rebuildDiffSummaryPanel();
 }
+function requestedPageLabel() {
+  const a = state.docA ? `A ${state.pageA + 1}` : 'A —';
+  const b = state.docB ? `B ${state.pageB + 1}` : 'B —';
+  return state.activeSubTab === 'a' ? a : state.activeSubTab === 'b' ? b : `${a} / ${b}`;
+}
 function updatePageInfo() {
-  const la = state.docA ? `A: ${state.pageA + 1}/${state.totalA}` : 'A: —';
-  const lb = state.docB ? `B: ${state.pageB + 1}/${state.totalB}` : 'B: —';
-  pageInfo.textContent = `${la}  ${lb}`;
+  const target = requestedPageLabel();
+  pageInfo.textContent = _visiblePageLabel === target ? `表示中 ${target}`
+    : `${_visiblePageLabel ? `表示中 ${_visiblePageLabel}` : '表示待ち'} → ${target} 準備中`;
+  pageInfo.title = `選択: A ${state.pageA + 1}/${state.totalA}・B ${state.pageB + 1}/${state.totalB}。クリックしてページ番号を入力`;
 }
 function updateNavButtons() {
+  if(state.pageMap) {
+    const rows=comparisonRows(), index=rows.findIndex(r=>r.id===currentComparisonPage());
+    $('btn-prev').disabled=index<=0; $('btn-next').disabled=index>=rows.length-1;updatePageInfo();return;
+  }
   $('btn-prev').disabled = state.pageA <= 0 && state.pageB <= 0;
   $('btn-next').disabled = (!state.docA || state.pageA >= state.totalA - 1) && (!state.docB || state.pageB >= state.totalB - 1);
   updatePageInfo();
 }
 function changePage(delta) {
+  if (state.pageMap) {
+    const rows = comparisonRows();
+    const current = currentComparisonPage();
+    const index = rows.findIndex(r=>r.id===current);
+    const next = rows[index+delta];
+    if(next) goToPage(next.id);
+    return;
+  }
   let changed = false;
   if (state.docA && state.pageA + delta >= 0 && state.pageA + delta < state.totalA) { state.pageA += delta; changed = true; }
   if (state.docB && state.pageB + delta >= 0 && state.pageB + delta < state.totalB) { state.pageB += delta; changed = true; }
@@ -3721,6 +3787,11 @@ function changePage(delta) {
   refreshTextPanel();
 }
 function goToPage(idx) {
+  if (state.pageMap && (idx >= state.totalA || bPageFor(idx) < 0)) {
+    if (idx >= state.totalA) { state.pageB = idx-state.totalA; switchSubTab('b'); }
+    else { state.pageA = idx; switchSubTab('a'); }
+    syncPageIndex(); renderCurrentView(); refreshTextPanel(); return;
+  }
   let changed = false;
   if (state.docA && idx >= 0 && idx < state.totalA) { state.pageA = idx; changed = true; }
   const bIdx = bPageFor(idx);
@@ -3801,23 +3872,26 @@ function rebuildDiffSummaryPanel() {
     ? (state.scanErrors.size ? `読み取り失敗: ${state.scanErrors.size}ページ。要確認のページを確認してください。` : `比較完了 · 差分 ${allDiffPages().size}ページ`)
     : state.scanStatus === 'paused' ? '比較を一時停止中です。続きから再開できます。' : state.scanStatus === 'idle' ? 'A・BのPDFを開くと比較を開始します。' : '比較中… 完了まで差分判定は未確定です。';
   frag.appendChild(notice);
-  for (let i = 0; i < total; i++) {
+  const rows = state.pageMap ? comparisonRows() : Array.from({length:total},(_,id)=>({id,a:id<state.totalA?id:null,b:id<state.totalB?id:null}));
+  for (const row of rows) {
+    const i = row.id;
     const pix = state.diffPages.has(i);
     const txt = state.textDiffPages.has(i);
     if (state.diffFilterOnly && !pix && !txt && !state.scanErrors.has(i)) continue;
     const div = document.createElement('div');
-    div.className = `diff-summary-item${(pix || txt) ? ' has-diff' : ''}${i === state.pageA ? ' current' : ''}`;
+    div.className = `diff-summary-item${(pix || txt) ? ' has-diff' : ''}${i === currentComparisonPage() ? ' current' : ''}`;
     div.setAttribute('role', 'button');
     div.setAttribute('tabindex', '0');
     let marks = '';
     if (pix) marks += '<span class="diff-dot" title="画像差分"></span>';
     if (txt) marks += '<span class="diff-dot text" title="テキスト差分"></span>';
     const kinds = [];
-    if (state.pageBOffset === 0 && i >= state.totalA) kinds.push('ページ追加');
-    else if (state.pageBOffset === 0 && i >= state.totalB) kinds.push('ページ削除');
-    else { if (pix) kinds.push('画像'); if (txt) kinds.push('文字'); }
+    if (row.a === null) kinds.push('追加');
+    else if (row.b === null) kinds.push('削除');
     if (state.scanErrors.has(i)) kinds.push('読み取り失敗');
-    div.innerHTML = marks + `Page ${i + 1}`;
+    const pageLabel = state.pageMap ? `A ${row.a === null ? '—' : row.a+1} ↔ B ${row.b === null ? '—' : row.b+1}` : `Page ${i+1}`;
+    div.innerHTML = `<span class="diff-page-label">${pageLabel}</span>` + marks;
+    div.setAttribute('aria-label', `${pageLabel}${pix?' 画像差分':''}${txt?' テキスト差分':''}`);
     const detail = document.createElement('span');
     detail.className = 'diff-kind-label'; detail.textContent = kinds.join('・');
     div.appendChild(detail);
@@ -3886,6 +3960,11 @@ function updateRegionList() {
 }
 
 function currentComparisonPage() {
+  if (state.pageMap && state.activeSubTab === 'b') {
+    const a = state.pageMap.indexOf(state.pageB);
+    return a < 0 ? state.totalA+state.pageB : a;
+  }
+  if (state.pageMap) return state.pageA;
   // B側にだけ存在する末尾ページでも「次へ」が同じページで止まらない。
   return state.pageBOffset === 0 && state.pageB >= state.totalA ? state.pageB : state.pageA;
 }
@@ -4501,3 +4580,88 @@ quietHud.addEventListener('pointerleave', wakeViewerHud);
 quietHud.addEventListener('focusin', wakeViewerHud);
 quietHud.addEventListener('focusout', wakeViewerHud);
 wakeViewerHud();
+
+let pairEditorSelection = 0;
+let pairPreviewVersion = 0;
+let pairPreviewURLs = [];
+function clearPairPreview() {
+  ++pairPreviewVersion;
+  for (const url of pairPreviewURLs) URL.revokeObjectURL(url);
+  pairPreviewURLs = [];
+  $('page-pair-preview').replaceChildren();
+}
+function shiftedPageValues(values, start, delta, total) {
+  const result = values.map((value,i) => i < start || value === '' ? value : String(Number(value)+delta));
+  if (result.some(value => value !== '' && (!Number.isInteger(Number(value)) || Number(value)<1 || Number(value)>total))) return null;
+  return result;
+}
+async function showPairPreview(index) {
+  pairEditorSelection = index;
+  clearPairPreview();
+  const version = pairPreviewVersion;
+  const inputs = [...$('page-pair-rows').querySelectorAll('input')];
+  if (!inputs[index]) return;
+  inputs.forEach((input,i)=>input.closest('.page-pair-row').classList.toggle('selected',i===index));
+  $('page-pair-selection').textContent = `A ${index+1} 以降のB番号`;
+  const targets = [{side:'a', page:index, doc:state.docA}, {side:'b', page:inputs[index].value === '' ? -1 : Number(inputs[index].value)-1, doc:state.docB}];
+  // Only two previews, generated sequentially and released on selection changes.
+  for (const target of targets) {
+    if(version!==pairPreviewVersion) return;
+    const figure=document.createElement('figure');const caption=document.createElement('figcaption');
+    caption.textContent=`${target.side.toUpperCase()} ${target.page<0 ? '対応なし' : target.page+1}`;
+    figure.append(caption);$('page-pair-preview').append(figure);
+    if(!target.doc || !Number.isInteger(target.page) || target.page<0 || target.page>=target.doc.numPages) continue;
+    try {
+      while(_activeViews) { await new Promise(resolve=>setTimeout(resolve,50));if(version!==pairPreviewVersion)return; }
+      const url=await (_thumbChain = _thumbChain.catch(()=>{}).then(()=>
+        version===pairPreviewVersion ? renderThumbBlobURL(target.doc,target.page) : null));
+      if(!url)return;
+      if(version!==pairPreviewVersion || target.doc!==(target.side==='a'?state.docA:state.docB)) {URL.revokeObjectURL(url);return;}
+      pairPreviewURLs.push(url);
+      const img=document.createElement('img');img.src=url;img.alt=`${caption.textContent} の紙面`;figure.append(img);
+    } catch { if(version===pairPreviewVersion) caption.textContent+='（読込失敗）'; }
+  }
+}
+function buildPagePairEditor() {
+  clearPairPreview();
+  const body = $('page-pair-rows'); body.replaceChildren();
+  for(let a=0;a<state.totalA;a++) {
+    const row = document.createElement('div');row.className='page-pair-row';
+    const title = document.createElement('button');title.type='button';title.textContent=`A ${a+1}`;
+    title.title='対応する紙面を見比べる';title.addEventListener('click',()=>showPairPreview(a));
+    const input=document.createElement('input');input.type='number';input.min='1';input.max=String(state.totalB);
+    const b=bPageFor(a);input.value=b>=0 && b<state.totalB ? b+1 : '';input.placeholder='削除';
+    input.setAttribute('aria-label',`A ${a+1} に対応するBのページ。空欄は削除`);
+    input.addEventListener('focus',()=>{if(pairEditorSelection!==a)showPairPreview(a);});
+    input.addEventListener('change',()=>{showPairPreview(a);$('page-pair-note').textContent='編集中 · 適用するまで比較は変わりません。';});
+    row.append(title,document.createTextNode('→ B'),input);body.append(row);
+  }
+  if(state.totalA) showPairPreview(Math.min(pairEditorSelection,state.totalA-1));
+}
+$('page-pair-settings').addEventListener('toggle',()=>{if($('page-pair-settings').open)buildPagePairEditor();else clearPairPreview();});
+for (const [id,delta] of [['page-pair-minus',-1],['page-pair-plus',1]]) {
+  $(id).addEventListener('click',()=>{
+    const inputs=[...$('page-pair-rows').querySelectorAll('input')];
+    const shifted=shiftedPageValues(inputs.map(input=>input.value),pairEditorSelection,delta,state.totalB);
+    if(!shifted) {$('page-pair-note').textContent='範囲外になるため変更していません。対応しない行を空欄にしてから調整してください。';return;}
+    inputs.forEach((input,i)=>input.value=shifted[i]);
+    showPairPreview(pairEditorSelection);
+    $('page-pair-note').textContent=`A ${pairEditorSelection+1}以降を${delta>0?'+1':'−1'} · 未適用（空欄は維持）`;
+  });
+}
+function applyPageMap(map) {
+  state.pageMap=map;state.pageBOffset=0;
+  comparisonCache.clear();state.regions=null;state.lastDiffView=null;
+  goToPage(0);updatePageLinkButton();startDiffScan();
+}
+$('page-pair-apply').addEventListener('click',()=>{
+  const inputs=[...$('page-pair-rows').querySelectorAll('input')];
+  const map=inputs.map(input=>input.value===''?null:Number(input.value)-1);
+  const assigned=map.filter(b=>b!==null);
+  if(!state.docA || !state.docB || map.length!==state.totalA || assigned.some(b=>!Number.isInteger(b)||b<0||b>=state.totalB) || new Set(assigned).size!==assigned.length) {
+    $('page-pair-note').textContent='Bのページは範囲内で重複なく指定してください。';return;
+  }
+  applyPageMap(map);
+  $('page-pair-note').textContent=`適用済み · 対応 ${assigned.length} / 削除 ${map.length-assigned.length} / 追加 ${state.totalB-assigned.length}`;
+});
+$('page-pair-reset').addEventListener('click',()=>{applyPageMap(null);buildPagePairEditor();$('page-pair-note').textContent='同じ番号同士の対応に戻しました。';});
