@@ -2542,3 +2542,28 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 .pair-shift-controls span { flex:1; font-size:11px; color:var(--text-secondary); }
 .page-pair-row.selected { background:var(--bg-thumb-hover); box-shadow:inset 2px 0 var(--text-secondary); }
 .page-pair-settings .page-pair-row button { text-align:left; border:0; background:none; margin:0; padding:4px 0; }
+
+/* Keep page navigation hit targets stationary through loading and number editing. */
+#viewer-hud .hud-pages {
+  display:grid; grid-template-columns:32px 164px 32px; gap:3px;
+  width:234px; min-width:234px; flex:0 0 234px;
+}
+#viewer-hud .hud-pages > .hud-btn { width:32px; height:36px; }
+#viewer-hud #page-info {
+  width:164px; min-width:0; max-width:164px; height:36px;
+  box-sizing:border-box; padding:4px 6px; font-size:11px; line-height:14px;
+  white-space:pre; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums;
+}
+#viewer-hud .hud-pages > .page-number-editor { width:164px !important; min-width:0; height:36px; box-sizing:border-box; }
+
+#viewer-hud #page-info { height:32px; line-height:24px; white-space:nowrap; }
+#viewer-hud .hud-pages > .hud-btn, #viewer-hud .hud-pages > .page-number-editor { height:32px; }
+
+#annot-quick-edit { position:absolute; z-index:45; display:flex; align-items:center; gap:6px; padding:5px 8px; background:var(--bg-panel); border:1px solid var(--border); border-radius:6px; box-shadow:var(--shadow-sm); font-size:11px; }
+#annot-quick-edit[hidden] { display:none; }
+#annot-quick-edit input { width:25px; height:25px; padding:0; border:0; }
+#annot-quick-edit button { color:var(--text-primary); background:var(--bg-thumb); border:0; border-radius:4px; padding:5px; }
+
+#annot-quick-edit { max-width:calc(100% - 16px); flex-wrap:wrap; }
+#annot-quick-edit #annot-quick-width { width:42px; color:var(--text-primary); background:var(--bg-thumb); }
+#annot-quick-text { flex-basis:100%; width:210px; color:var(--text-primary); background:var(--bg-panel); border:1px solid var(--border); padding:4px; resize:vertical; }
