@@ -2567,3 +2567,10 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 #annot-quick-edit { max-width:calc(100% - 16px); flex-wrap:wrap; }
 #annot-quick-edit #annot-quick-width { width:42px; color:var(--text-primary); background:var(--bg-thumb); }
 #annot-quick-text { flex-basis:100%; width:210px; color:var(--text-primary); background:var(--bg-panel); border:1px solid var(--border); padding:4px; resize:vertical; }
+
+/* Compact page labels remain on one line in narrow sidebars. */
+.thumb-info { min-width:0; }
+.thumb-page-num { display:flex; align-items:center; gap:6px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.thumb-page-num .diff-dot { flex-shrink:0; margin:0; }
+.thumb-number { flex-shrink:0; }
+.diff-page-label { white-space:nowrap; }
