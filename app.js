@@ -2,6 +2,7 @@
  * SABUN PWA — app.js (v2)
  **/
 
+import { RegionCache } from './lib/region-cache.mjs';
 import { ViewCache } from './lib/view-cache.mjs';
 import * as pdfjsLib from './lib/pdf.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './lib/pdf.worker.mjs';
@@ -153,6 +154,39 @@ const state = {
 //          x1,y1,x2,y2 (PDF pt 左下原点), text?, fontSize? }
 const annots = { a: new Map(), b: new Map() };
 let annotIdSeq = 1;
+const annotSelection = new Set();
+let annotHistory = [JSON.stringify({a:[],b:[]})], annotHistoryIndex = 0, restoringAnnots = false;
+function selectedAnnots() {
+  if(!state.selectedAnnot) {annotSelection.clear();return [];}
+  if(!annotSelection.has(state.selectedAnnot)) {annotSelection.clear();annotSelection.add(state.selectedAnnot);}
+  const visible=new Set(visibleAnnotSides().flatMap(side=>annotListFor(side,annotPage(side))||[]));
+  return [...annotSelection].filter(s=>visible.has(s));
+}
+function rememberAnnots() {
+  if(restoringAnnots || state.annotDrag || state.annotResize || state.annotDraft) return;
+  const value=JSON.stringify({a:[...annots.a],b:[...annots.b]});
+  if(value===annotHistory[annotHistoryIndex])return;
+  annotHistory=annotHistory.slice(0,annotHistoryIndex+1);annotHistory.push(value);
+  while(annotHistory.length>2 && (annotHistory.length>40 || annotHistory.reduce((n,s)=>n+s.length,0)>2000000))annotHistory.shift();
+  annotHistoryIndex=annotHistory.length-1;
+}
+function restoreAnnots(delta) {
+  rememberAnnots();
+  const index=annotHistoryIndex+delta;if(index<0||index>=annotHistory.length)return;
+  restoringAnnots=true;const data=JSON.parse(annotHistory[index]);
+  for(const side of ['a','b']) {annots[side].clear();for(const [page,list] of data[side])annots[side].set(page,list);}
+  annotHistoryIndex=index;state.selectedAnnot=null;annotSelection.clear();
+  drawAnnotsOverlay();updateAnnotListPanel();restoringAnnots=false;
+}
+function duplicateSelectedAnnots() {
+  const copies=[];
+  for(const shape of selectedAnnots()) {
+    const side=shapeSide(shape), copy={...shape,id:annotIdSeq++,x1:shape.x1+8,x2:shape.x2+8,y1:shape.y1-8,y2:shape.y2-8};
+    annotListFor(side,annotPage(side),true).push(copy);copies.push(copy);
+  }
+  annotSelection.clear();copies.forEach(s=>annotSelection.add(s));state.selectedAnnot=copies.at(-1)||null;
+  drawAnnotsOverlay();updateAnnotListPanel();
+}
 // 注釈クリップボード (Ctrl/Cmd+C → V で複製)
 let _annotClipboard = null;
 
@@ -386,6 +420,7 @@ async function renderPageData(page, scale, annotations) {
     return ctx.getImageData(0, 0, w, h);
   } finally {
     canvas.width = 0; canvas.height = 0;
+    try { page.cleanup(); } catch { /* rendering may still be shared */ }
   }
 }
 
@@ -408,16 +443,21 @@ async function renderThumbBlobURL(doc, pageIndex) {
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: ctx, viewport: vp, annotationMode: pdfjsLib.AnnotationMode.DISABLE }).promise;
-  const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.75));
-  canvas.width = 0; canvas.height = 0;
-  if (!blob) throw new Error('thumb encode failed');
-  return URL.createObjectURL(blob);
+  try {
+    await page.render({ canvasContext: ctx, viewport: vp, annotationMode: pdfjsLib.AnnotationMode.DISABLE }).promise;
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.75));
+    if (!blob) throw new Error('thumb encode failed');
+    return URL.createObjectURL(blob);
+  } finally {
+    canvas.width = 0; canvas.height = 0;
+    try { page.cleanup(); } catch { /* PDF.js defers cleanup while rendering */ }
+  }
 }
 
 // ─────────────────────────────────────────────────────────
 // CACHE — バイト上限ベースの LRU
 // ─────────────────────────────────────────────────────────
+const regionCache = new RegionCache();
 const comparisonCache = new ViewCache((DEVICE_GB >= 8 ? 32 : 16) * 1024 * 1024);
 let _prefetchTimer = null;
 let _prefetchRunning = false;
@@ -430,6 +470,7 @@ const cacheB = new Map();
 const cacheBytes = { a: 0, b: 0 };
 
 function clearCache(side) {
+  regionCache.clear();
   comparisonCache.clear();
   (side === 'a' ? cacheA : cacheB).clear();
   cacheBytes[side] = 0;
@@ -450,6 +491,7 @@ function cacheSet(side, key, entry) {
     map.delete(key);
   }
   entry.bytes = entry.img.data.byteLength;
+  if(entry.bytes > MAX_CACHE_BYTES) { updateCacheLabel(); return; }
   map.set(key, entry);
   cacheBytes[side] += entry.bytes;
   while (cacheBytes[side] > MAX_CACHE_BYTES && map.size > 1) {
@@ -494,7 +536,7 @@ function releasePdfWorkingSet() {
   // PDF.js のページごとの描画・演算子キャッシュを、全件スキャン後に解放する。
   // 表示中のページは必要になった時に再生成されるため、100ページ級でも常駐を避けられる。
   for (const doc of [state.docA, state.docB]) {
-    try { doc?.cleanup(); } catch { /* cleanup 非対応のPDFは無視 */ }
+    try { Promise.resolve(doc?.cleanup()).catch(() => {}); } catch { /* cleanup 非対応のPDFは無視 */ }
   }
   updateCacheLabel();
 }
@@ -650,12 +692,9 @@ function setupCanvas(w, h, rs) {
   if (viewCanvas.height !== h) viewCanvas.height = h;
   viewCanvas.style.width = (w / DPR) + 'px';
   viewCanvas.style.height = (h / DPR) + 'px';
-  // 注釈オーバーレイを本体キャンバスと同サイズに同期
-  if (annotCanvas.width !== w) annotCanvas.width = w;
-  if (annotCanvas.height !== h) annotCanvas.height = h;
+  // Overlay backing pixels are allocated lazily only when annotations exist.
   annotCanvas.style.width = viewCanvas.style.width;
   annotCanvas.style.height = viewCanvas.style.height;
-  annotCanvas.style.display = 'block';
   state.renderScale = rs;
   viewCanvas.style.display = 'block';
   viewPlaceholder.style.display = 'none';
@@ -870,7 +909,7 @@ function updateModeFromKeys() {
   let newMode = state.persistentMode;
   let isTemp = false;
 
-  if (isShift && !isSpace && !isCtrl && !isAlt && state.persistentMode !== 'offset') {
+  if (isShift && !isSpace && !isCtrl && !isAlt && state.persistentMode !== 'offset' && state.annotTool !== 'select') {
     newMode = 'marquee'; isTemp = true;
   } else if (isSpace) {
     if (isCtrl && isAlt) { newMode = 'zoom_out'; isTemp = true; }
@@ -1057,14 +1096,26 @@ function visibleAnnotSides() {
 }
 
 function drawAnnotsOverlay() {
-  if (!annotCanvas || annotCanvas.style.display === 'none') return;
+  rememberAnnots();
+  updateAnnotQuickEdit();
+  if (!annotCanvas) return;
+  const needed = viewCanvas.style.display !== 'none' && (state.annotDraft || visibleAnnotSides().some(side=>(annotListFor(side,annotPage(side))||[]).length));
+  if(!needed) {
+    if(annotCanvas.width)annotCanvas.width=0;
+    if(annotCanvas.height)annotCanvas.height=0;
+    annotCanvas.style.display='none';return;
+  }
+  if(annotCanvas.width!==viewCanvas.width)annotCanvas.width=viewCanvas.width;
+  if(annotCanvas.height!==viewCanvas.height)annotCanvas.height=viewCanvas.height;
+  annotCanvas.style.display='block';
   const ctx = annotCanvas.getContext('2d');
   ctx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+  const selection = new Set(selectedAnnots());
   for (const side of visibleAnnotSides()) {
     const list = annotListFor(side, annotPage(side));
     if (!list) continue;
     const t = sideTransform(side);
-    for (const s of list) drawShape(ctx, s, t, s === state.selectedAnnot);
+    for (const s of list) drawShape(ctx, s, t, selection.has(s));
   }
   if (state.annotDraft) {
     drawShape(ctx, state.annotDraft, sideTransform(state.annotDraftSide || 'a'), false);
@@ -1143,8 +1194,8 @@ function drawShape(ctx, s, t, selected) {
     ctx.strokeRect(bb.x - 4, bb.y - 4, bb.w + 8, bb.h + 8);
     // リサイズハンドル
     ctx.setLineDash([]);
-    for (const hd of shapeHandles(s, t)) {
-      const r = Math.max(4, 4.5 * rs / 2);
+    for (const hd of (selectedAnnots().length===1 ? shapeHandles(s, t) : [])) {
+      const r = 4 * rs / Math.max(state.zoomFactor,0.05);
       ctx.fillStyle = '#ffffff';
       ctx.strokeStyle = 'rgba(59, 130, 246, 1)';
       ctx.lineWidth = Math.max(1.2, rs * 0.7);
@@ -1176,9 +1227,9 @@ function shapeHandles(s, t) {
 
 // ハンドルのヒットテスト (選択中図形のみ)
 function handleHitTest(ix, iy) {
-  if (!state.selectedAnnot) return null;
+  if (!state.selectedAnnot || selectedAnnots().length>1) return null;
   const t = sideTransform(shapeSide(state.selectedAnnot));
-  const tol = Math.max(8, 9 * t.rs / 2);
+  const tol = 7 * t.rs / Math.max(state.zoomFactor,0.05);
   for (const hd of shapeHandles(state.selectedAnnot, t)) {
     if (Math.abs(ix - hd.ix) <= tol && Math.abs(iy - hd.iy) <= tol) return hd.handle;
   }
@@ -1209,7 +1260,7 @@ function annotHitTest(ix, iy) {
     const list = annotListFor(side, annotPage(side));
     if (!list) continue;
     const t = sideTransform(side);
-    const slop = 8 * t.rs / 2;
+    const slop = 6 * t.rs / Math.max(state.zoomFactor,0.05);
     for (let i = list.length - 1; i >= 0; i--) {
       const bb = shapeBBoxImage(list[i], t);
       if (ix >= bb.x - slop && ix <= bb.x + bb.w + slop && iy >= bb.y - slop && iy <= bb.y + bb.h + slop) {
@@ -1246,13 +1297,9 @@ function selectAnnotTool(tool) {
 }
 
 function deleteSelectedAnnot() {
-  if (!state.selectedAnnot) return;
-  for (const side of ['a', 'b']) {
-    for (const [, list] of annots[side]) {
-      const i = list.indexOf(state.selectedAnnot);
-      if (i >= 0) { list.splice(i, 1); state.selectedAnnot = null; drawAnnotsOverlay(); updateAnnotListPanel(); setStatus('注釈を削除しました', 2000); return; }
-    }
-  }
+  const selected=new Set(selectedAnnots());if(!selected.size)return;
+  for(const side of ['a','b'])for(const [page,list] of annots[side])annots[side].set(page,list.filter(s=>!selected.has(s)));
+  state.selectedAnnot=null;annotSelection.clear();drawAnnotsOverlay();updateAnnotListPanel();
 }
 
 function annotCount(side) {
@@ -1464,13 +1511,9 @@ async function computeRegionsOnly(imgA, imgB) {
   const threshold = HIGHLIGHT_THRESHOLDS[state.sensitivity];
   const minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity];
   const call = workerCall('regions', imgA, imgB, { threshold, minBlockPixels });
-  if (!call) return { count: 0, regions: [] };
-  try {
-    const m = await call;
-    return { count: m.count || 0, regions: m.regions || [] };
-  } catch {
-    return { count: 0, regions: [] };
-  }
+  if (!call) throw new Error('領域検出を開始できません。再読み込みしてお試しください。');
+  const m = await call;
+  return { count: m.count || 0, regions: m.regions || [] };
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1478,15 +1521,24 @@ async function computeRegionsOnly(imgA, imgB) {
 // ─────────────────────────────────────────────────────────
 // ページの差分領域を計算。
 // 戻り値: { regions: [{x,y,w,h}], rs, pageHA, pageHB } (画像px)
-async function computeRegionsForPage(pageIdx) {
+function regionKey(a, b, scale) {
+  return JSON.stringify([a,b,scale,state.sensitivity,state.offsetDx,state.offsetDy]);
+}
+async function computeRegionsForPage(pageIdx, bIdx = bPageFor(pageIdx), prepared = null) {
   const visualScale = computeVisualScale();
-  const [ea, eb] = await Promise.all([
-    getOrRender('a', pageIdx, visualScale, false),
-    getOrRender('b', bPageFor(pageIdx), visualScale, false),
-  ]);
-  const imgB = alignBToA(eb, ea);
-  const { regions } = await computeRegionsOnly(ea.img, imgB);
-  return { regions, rs: ea.scale, pageHA: ea.img.height / ea.scale, pageHB: eb.img.height / eb.scale };
+  const key = regionKey(pageIdx,bIdx,visualScale);
+  const docA=state.docA, docB=state.docB;
+  const current=()=>docA===state.docA && docB===state.docB && regionKey(pageIdx,bIdx,computeVisualScale())===key;
+  return regionCache.obtain(key, async()=>{
+    if(!current())throw new Error('領域検出の条件が変更されました');
+    const [ea,eb]=prepared || await Promise.all([
+      getOrRender('a',pageIdx,visualScale,false),getOrRender('b',bIdx,visualScale,false),
+    ]);
+    if(!current())throw new Error('領域検出の条件が変更されました');
+    const result=await computeRegionsOnly(ea.img,alignBToA(eb,ea));
+    if(!current())throw new Error('領域検出の条件が変更されました');
+    return {...result,rs:ea.scale,pageHA:ea.img.height/ea.scale,pageHB:eb.img.height/eb.scale};
+  });
 }
 
 function regionToShape(r, rs, pageH, sideShiftX, sideShiftY) {
@@ -1535,9 +1587,9 @@ function mergeRegionsForAnnotation(regions, rs) {
  * 枠スタイルは注釈バーの設定(線色/塗り/線幅/線種)が適用される。
  */
 async function autoAnnotateRegions(scope = 'page') {
+  if (state.autoAnnotating) { setStatus('注釈化を実行中です。完了までお待ちください。',3000);return 0; }
   if (!state.docA || !state.docB) { setStatus('A・B両方のPDFが必要です', 3000); return 0; }
   const sides = state.annotTarget === 'both' ? ['a', 'b'] : [state.annotTarget];
-  const maxCommon = Math.min(state.totalA, state.totalB);
   let pages;
   if (scope === 'all') {
     if (!requireCompleteScan()) return 0;
@@ -1548,33 +1600,35 @@ async function autoAnnotateRegions(scope = 'page') {
     pages = [state.pageA];
   }
 
+  const docA = state.docA, docB = state.docB;
+  const signature = () => JSON.stringify([state.pageMap,state.pageBOffset,state.sensitivity,state.quality,
+    state.offsetDx,state.offsetDy,state.annotTarget,state.annotStroke,state.annotFill,state.annotWidth,state.annotDash]);
+  const initialSignature=signature();
+  const assertCurrent=()=>{if(docA!==state.docA || docB!==state.docB || signature()!==initialSignature)throw new Error('ファイルまたは設定が変更されました。新しい条件で再実行してください。');};
+  const staged=[];
+  state.autoAnnotating=true;
+  const controls=typeof document==='undefined'?[]:['btn-annot-regions-page','btn-annot-regions-all'].map(id=>document.getElementById(id)).filter(Boolean);
+  controls.forEach(button=>button.disabled=true);
   busyShow();
   let added = 0;
   try {
     for (let i = 0; i < pages.length; i++) {
+      assertCurrent();
       const pageIdx = pages[i];
       if (scope === 'all') setStatus(`差分領域を注釈化中... ${i + 1} / ${pages.length}`);
-      // 現在ページで計算済みの領域があれば再利用
-      let info;
-      if (pageIdx === state.pageA && state.regions && state.regions.list.length && DIFF_TABS.includes(state.activeSubTab)) {
-        info = {
-          regions: state.regions.list, rs: state.regions.rs,
-          pageHA: viewCanvas.height / state.regions.rs,
-          pageHB: viewCanvas.height / state.regions.rs,
-        };
-      } else {
-        info = await computeRegionsForPage(pageIdx);
-      }
+      const info = await computeRegionsForPage(pageIdx);
       // 画面に表示する差分領域と、注釈として出力する矩形を必ず一致させる。
       // ここで追加統合すると、利用者が確認した範囲と提出用PDFの範囲が食い違う。
+      assertCurrent();
       const submissionRegions = info.regions;
-      for (const {side, idx} of jobs) {
+      for (const side of sides) {
         const shiftX = side === 'b' ? -state.offsetDx : 0;
         const shiftY = side === 'b' ? state.offsetDy : 0;
         const pageH = side === 'b' ? info.pageHB : info.pageHA;
         const pageKey = side === 'b' ? bPageFor(pageIdx) : pageIdx;
         if (side === 'b' && (pageKey < 0 || pageKey >= state.totalB)) continue;
-        const list = annotListFor(side, pageKey, true);
+        const list = [];
+        staged.push({side,pageKey,list});
         for (const r of submissionRegions) {
           list.push(regionToShape(r, info.rs, pageH, shiftX, shiftY));
           added++;
@@ -1582,7 +1636,18 @@ async function autoAnnotateRegions(scope = 'page') {
       }
       await new Promise(r => setTimeout(r, 0));
     }
+    assertCurrent();
+    // No annotation mutation until every page has completed successfully.
+    for(const batch of staged) {
+      const destination=annotListFor(batch.side,batch.pageKey,true);
+      for(const shape of batch.list)destination.push(shape);
+    }
+  } catch(error) {
+    setStatus(`注釈化を中止しました。注釈は追加していません。${error.message || error}`,8000);
+    return 0;
   } finally {
+    state.autoAnnotating=false;
+    controls.forEach(button=>button.disabled=false);
     busyHide();
   }
   drawAnnotsOverlay();
@@ -1924,7 +1989,8 @@ function updateAnnotListPanel() {
       for (const sh of annots[side].get(pg)) {
         total++;
         const row = document.createElement('div');
-        row.className = 'annot-item' + (sh === state.selectedAnnot ? ' current' : '');
+        row.className = 'annot-item' + (selectedAnnots().includes(sh) ? ' current' : '');
+        row.dataset.annotId=String(sh.id);
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
         const sideBadge = document.createElement('span');
@@ -1955,10 +2021,17 @@ function updateAnnotListPanel() {
         row.appendChild(chip);
         row.appendChild(label);
         row.appendChild(del);
-        const activate = () => jumpToAnnot(side, pg, sh);
+        const activate = (event) => {
+          if(event?.shiftKey && pg===annotPage(side) && visibleAnnotSides().includes(side)) {
+            selectedAnnots();
+            if(annotSelection.has(sh))annotSelection.delete(sh);else annotSelection.add(sh);
+            state.selectedAnnot=[...annotSelection].at(-1)||null;
+            drawAnnotsOverlay();updateAnnotListPanel();
+          } else jumpToAnnot(side, pg, sh);
+        };
         row.addEventListener('click', activate);
         row.addEventListener('keydown', e => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(e); }
         });
         frag.appendChild(row);
       }
@@ -2179,13 +2252,14 @@ async function generatePdfReport() {
 }
 
 // 注釈マウス操作 (戻り値: イベントを消費したか)
-function annotMouseDown(ix, iy, cssX, cssY, altKey = false) {
+function annotMouseDown(ix, iy, cssX, cssY, altKey = false, shiftKey = false) {
+  rememberAnnots();
   const tool = state.annotTool;
   if (!tool || viewCanvas.style.display === 'none') return false;
 
   if (tool === 'select') {
     // 1) リサイズハンドル (選択中図形)
-    const handle = handleHitTest(ix, iy);
+    const handle = shiftKey ? null : handleHitTest(ix, iy);
     if (handle) {
       const s = state.selectedAnnot;
       state.annotResize = {
@@ -2198,16 +2272,24 @@ function annotMouseDown(ix, iy, cssX, cssY, altKey = false) {
     const hit = annotHitTest(ix, iy);
     if (hit) {
       let shape = hit.shape;
+      if(shiftKey) {
+        selectedAnnots();
+        if(annotSelection.has(shape))annotSelection.delete(shape);else annotSelection.add(shape);
+        state.selectedAnnot=[...annotSelection].at(-1)||null;
+        drawAnnotsOverlay();updateAnnotListPanel();return true;
+      }
+      if(!annotSelection.has(shape) || altKey)annotSelection.clear();
       if (altKey) {
         shape = { ...hit.shape, id: annotIdSeq++ };
         annotListFor(hit.side, annotPage(hit.side), true).push(shape);
         setStatus('注釈を複製しました (Option+ドラッグ)', 2000);
       }
-      state.selectedAnnot = shape;
+      state.selectedAnnot = shape;annotSelection.add(shape);
       state.annotDrag = {
         shape, t: sideTransform(hit.side),
         startIx: ix, startIy: iy,
         ox1: shape.x1, oy1: shape.y1, ox2: shape.x2, oy2: shape.y2,
+        group:selectedAnnots().map(s=>({s,x1:s.x1,y1:s.y1,x2:s.x2,y2:s.y2})),
       };
     } else {
       state.selectedAnnot = null;
@@ -2270,6 +2352,7 @@ function annotMouseMove(ix, iy) {
     const dyPt = -(iy - d.startIy) / d.t.rs;
     d.shape.x1 = d.ox1 + dxPt; d.shape.y1 = d.oy1 + dyPt;
     d.shape.x2 = d.ox2 + dxPt; d.shape.y2 = d.oy2 + dyPt;
+    for(const item of d.group||[])Object.assign(item.s,{x1:item.x1+dxPt,x2:item.x2+dxPt,y1:item.y1+dyPt,y2:item.y2+dyPt});
     drawAnnotsOverlay();
     return true;
   }
@@ -2337,7 +2420,7 @@ viewContainer.addEventListener('mousedown', e => {
   // 注釈ツールはカーソルモード時のみ反応 (パン/矩形ズーム/オフセット等のモードが優先)
   if (state.annotTool && !state.tempModeActive && mode === 'cursor') {
     const { ix, iy } = containerToImage(mouseX, mouseY);
-    if (annotMouseDown(ix, iy, mouseX, mouseY, e.altKey)) { e.preventDefault(); return; }
+    if (annotMouseDown(ix, iy, mouseX, mouseY, e.altKey, e.shiftKey)) { e.preventDefault(); return; }
   }
 
   if (mode === 'drag') {
@@ -2608,7 +2691,7 @@ document.addEventListener('keydown', e => {
     const s = state.selectedAnnot;
     const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
     const dy = e.key === 'ArrowUp' ? step : e.key === 'ArrowDown' ? -step : 0; // PDF座標は上が正
-    s.x1 += dx; s.x2 += dx; s.y1 += dy; s.y2 += dy;
+    for(const s of selectedAnnots()) {s.x1 += dx; s.x2 += dx; s.y1 += dy; s.y2 += dy;}
     drawAnnotsOverlay();
     return;
   }
@@ -2746,6 +2829,7 @@ async function loadPDF(side, file) {
 
     state.diffPages.clear();
     state.textDiffPages.clear();
+    annotSelection.clear();annotHistory=[JSON.stringify({a:[...annots.a],b:[...annots.b]})];annotHistoryIndex=0;
     state.pageMap = null;
     state.pageBOffset = 0;
     state.autoAlign = false;
@@ -2810,7 +2894,6 @@ function updateOpenChip(side) {
 // THUMBNAILS
 // ─────────────────────────────────────────────────────────
 const thumbObservers = { a: null, b: null };
-const thumbURLs = { a: [], b: [] };
 const thumbEntries = { a: new Map(), b: new Map() };
 const MAX_THUMB_ENTRIES = 24;
 let _thumbChain = Promise.resolve();
@@ -2820,8 +2903,7 @@ function buildThumbList(side) {
   const doc = side === 'a' ? state.docA : state.docB;
   const total = doc ? doc.numPages : 0;
 
-  thumbURLs[side].forEach(u => URL.revokeObjectURL(u));
-  thumbURLs[side] = [];
+  for(const entry of thumbEntries[side].values()) URL.revokeObjectURL(entry.url);
   thumbEntries[side].clear();
   if (thumbObservers[side]) { thumbObservers[side].disconnect(); thumbObservers[side] = null; }
   list.innerHTML = '';
@@ -2879,7 +2961,6 @@ function queueThumb(side, doc, i, itemEl) {
     try {
       const url = await renderThumbBlobURL(doc, i);
       if (!itemEl.isConnected) { URL.revokeObjectURL(url); return; }
-      thumbURLs[side].push(url);
       const ph = itemEl.querySelector('.thumb-img-placeholder');
       if (ph) {
         const img = document.createElement('img');
@@ -3575,6 +3656,11 @@ async function renderDiffComposite(token, op, forceFit) {
     busyShow();
     try {
       const imgRes = await computeDiffImage(op, ea.img, imgB);
+      if (token !== _renderToken) return false;
+      regionCache.set(regionKey(state.pageA,state.pageB,visualScale), {
+        regions:imgRes.regions || [],count:imgRes.count || 0,rs:ea.scale,
+        pageHA:ea.img.height/ea.scale,pageHB:eb.img.height/eb.scale,
+      });
       result = { key, img: imgRes.img, count: imgRes.count || 0, regions: imgRes.regions || [], scale: ea.scale };
     } finally { busyHide(); }
     if (token !== _renderToken) return false;
@@ -3712,29 +3798,35 @@ async function renderCurrentViewNow(token, forceFit) {
   ]);
   if (token !== _renderToken) return;
   const imgB = alignBToA(eb, ea);
-  const imgBPlain = alignBToA(ebPlain, eaPlain);
   const pair = await preparePair(ea.img, imgB, ea.scale);
   if (token !== _renderToken) {
     closeDrawable(pair.bmpA); closeDrawable(pair.bmpB);
     return;
   }
+  // Publish the paper and region overlay together, retaining the previous canvas meanwhile.
+  let regionsRes;
+  busyShow();
+  setStatus('紙面と領域枠を準備中…');
+  try {
+    regionsRes = await computeRegionsForPage(state.pageA,state.pageB,[eaPlain,ebPlain]);
+  } catch (error) {
+    closeDrawable(pair.bmpA); closeDrawable(pair.bmpB);
+    throw error;
+  } finally { busyHide(); }
+  if (token !== _renderToken) {
+    closeDrawable(pair.bmpA); closeDrawable(pair.bmpB);
+    return false;
+  }
   closePair();
   state.pair = pair;
-  state.regions = null;
-  state.diffPixels = 0;
+  state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
+  state.diffPixels = regionsRes.count;
   state.regionIdx = -1;
   updateRegionList();
   if (tab === 'aori') startAori();
   else if (tab === 'split') compositeSplit();
   if (forceFit) fitToView();
-  // The image is usable while region detection continues in the worker.
-  busyShow();
-  await computeRegionsOnly(eaPlain.img, imgBPlain).then(regionsRes => {
-    if (token !== _renderToken) return;
-    state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
-    state.diffPixels = regionsRes.count;
-    updateRegionList();
-  }).catch(() => {}).finally(busyHide);
+  setStatus('比較表示完了');
   return true;
 }
 
@@ -3753,10 +3845,12 @@ function requestedPageLabel() {
   return state.activeSubTab === 'a' ? a : state.activeSubTab === 'b' ? b : `${a} / ${b}`;
 }
 function updatePageInfo() {
-  const target = requestedPageLabel();
-  pageInfo.textContent = _visiblePageLabel === target ? `表示中 ${target}`
-    : `${_visiblePageLabel ? `表示中 ${_visiblePageLabel}` : '表示待ち'} → ${target} 準備中`;
-  pageInfo.title = `選択: A ${state.pageA + 1}/${state.totalA}・B ${state.pageB + 1}/${state.totalB}。クリックしてページ番号を入力`;
+  const a = state.docA ? `A ${state.pageA + 1}/${state.totalA}` : 'A —';
+  const b = state.docB ? `B ${state.pageB + 1}/${state.totalB}` : 'B —';
+  pageInfo.textContent = `${a}  ${b}`;
+  pageInfo.title = `${a}・${b}。クリックしてページ番号を入力`;
+  pageInfo.setAttribute('aria-label', `${a}、${b}。ページ番号を入力`);
+
 }
 function updateNavButtons() {
   if(state.pageMap) {
@@ -4102,6 +4196,7 @@ pageInfo.addEventListener('click', () => {
   const currentPage = state.docA ? state.pageA + 1 : state.pageB + 1;
   const totalMax = Math.max(state.totalA || 0, state.totalB || 0);
   const input = document.createElement('input');
+  input.className = 'page-number-editor';
   input.type = 'number';
   input.min = 1;
   input.max = totalMax;
@@ -4266,7 +4361,7 @@ document.querySelectorAll('[data-annot-tool]').forEach(btn => {
 // 注釈スタイル: 変更は既定値に反映し、選択中の注釈にも即適用 (Acrobat風)
 function applyStyleToSelection(patch) {
   if (!state.selectedAnnot) return;
-  Object.assign(state.selectedAnnot, patch);
+  for(const s of selectedAnnots())Object.assign(s, patch);
   drawAnnotsOverlay();
 }
 if (annotStrokeInput) {
@@ -4665,3 +4760,37 @@ $('page-pair-apply').addEventListener('click',()=>{
   $('page-pair-note').textContent=`適用済み · 対応 ${assigned.length} / 削除 ${map.length-assigned.length} / 追加 ${state.totalB-assigned.length}`;
 });
 $('page-pair-reset').addEventListener('click',()=>{applyPageMap(null);buildPagePairEditor();$('page-pair-note').textContent='同じ番号同士の対応に戻しました。';});
+
+function updateAnnotQuickEdit() {
+  const box=$('annot-quick-edit');if(!box)return;
+  const selected=selectedAnnots();
+  box.hidden=!selected.length || !annotBar || annotBar.hidden || !!state.annotDrag || !!state.annotResize;
+  $('btn-annot-undo').disabled=annotHistoryIndex<=0;
+  $('btn-annot-redo').disabled=annotHistoryIndex>=annotHistory.length-1;
+  if(box.hidden)return;
+  $('annot-quick-count').textContent=`${selected.length}件選択`;
+  $('annot-quick-text').hidden=selected.length!==1 || state.selectedAnnot.type!=='text';
+  if(document.activeElement!==$('annot-quick-text'))$('annot-quick-text').value=state.selectedAnnot.text||'';
+  if(document.activeElement!==$('annot-quick-width'))$('annot-quick-width').value=state.selectedAnnot.thickness||1;
+  const shape=state.selectedAnnot, bb=shapeBBoxImage(shape,sideTransform(shapeSide(shape)));
+  const scale=state.zoomFactor/(state.renderScale||DPR);
+  box.style.left=Math.max(8,Math.min(viewContainer.clientWidth-250,state.panX+bb.x*scale))+'px';
+  box.style.top=Math.max(8,Math.min(viewContainer.clientHeight-45,state.panY+bb.y*scale-42))+'px';
+  if(document.activeElement!==$('annot-quick-color'))$('annot-quick-color').value=shape.stroke||'#ff2d2d';
+  for(const row of document.querySelectorAll('.annot-item[data-annot-id]'))row.classList.toggle('current',selected.some(s=>String(s.id)===row.dataset.annotId));
+}
+$('btn-annot-undo').addEventListener('click',()=>restoreAnnots(-1));
+$('btn-annot-redo').addEventListener('click',()=>restoreAnnots(1));
+$('annot-quick-copy').addEventListener('click',duplicateSelectedAnnots);
+$('annot-quick-delete').addEventListener('click',deleteSelectedAnnot);
+$('annot-quick-color').addEventListener('change',e=>{state.annotStroke=e.target.value;if(annotStrokeInput)annotStrokeInput.value=e.target.value;applyStyleToSelection({stroke:e.target.value});});
+$('annot-quick-edit').addEventListener('mousedown',e=>e.stopPropagation());
+window.addEventListener('mouseup',()=>{rememberAnnots();updateAnnotQuickEdit();});
+document.addEventListener('keydown',e=>{
+  if(e.target.closest('input,textarea,select,[contenteditable="true"]') || annotBar.hidden)return;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z') {e.preventDefault();e.stopImmediatePropagation();restoreAnnots(e.shiftKey?1:-1);}
+  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'&&state.selectedAnnot) {e.preventDefault();e.stopImmediatePropagation();duplicateSelectedAnnots();}
+},true);
+
+$('annot-quick-width').addEventListener('change',e=>{const n=Number(e.target.value);if(n>=0.5&&n<=20){state.annotWidth=n;applyStyleToSelection({thickness:n});}});
+$('annot-quick-text').addEventListener('change',e=>{if(selectedAnnots().length===1 && state.selectedAnnot.type==='text')applyStyleToSelection({text:e.target.value});});
