@@ -79,7 +79,7 @@
           style="width:64px;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);">
       </label>
       <div class="toolbar-sep"></div>
-      <button class="toolbar-btn annot-tool" data-annot-tool="select" aria-pressed="false" title="注釈を選択/移動/サイズ変更 (V)">選択</button>
+      <button class="toolbar-btn annot-tool" data-annot-tool="select" aria-pressed="false" title="注釈を選択/移動/サイズ変更 (V)。Shift+クリックで複数選択">選択</button>
       <button class="toolbar-btn annot-tool" data-annot-tool="rect" aria-pressed="false" title="矩形を描く (R)">▭ 矩形</button>
       <button class="toolbar-btn annot-tool" data-annot-tool="ellipse" aria-pressed="false" title="楕円を描く (O)">◯ 楕円</button>
       <button class="toolbar-btn annot-tool" data-annot-tool="line" aria-pressed="false" title="線を描く (L)">／ 線</button>
@@ -133,6 +133,8 @@
 
       <div class="toolbar-sep"></div>
       <button class="toolbar-btn" id="btn-annot-list" title="注釈一覧パネルの表示/非表示 — 全ページの注釈にジャンプ/削除" aria-pressed="false">一覧</button>
+      <button class="toolbar-btn" id="btn-annot-undo" title="取り消し (Ctrl/Cmd+Z)" disabled>↶</button>
+      <button class="toolbar-btn" id="btn-annot-redo" title="やり直し (Ctrl/Cmd+Shift+Z)" disabled>↷</button>
       <button class="toolbar-btn" id="btn-annot-delete" title="選択中の注釈を削除 (Delete)">削除</button>
       <button class="toolbar-btn" id="btn-annot-clear" title="このページの注釈をA/B両方とも全て削除">ページ内クリア</button>
       <button class="toolbar-btn" id="btn-annot-clear-all" title="全ページの注釈をすべて削除 (確認あり)">全クリア</button>
@@ -268,9 +270,15 @@
               <div id="busy-indicator" role="status" aria-label="計算中"><div class="spinner"></div><span>計算中…</span></div>
               <div id="scan-progress" aria-hidden="true"></div>
 
+              <div id="annot-quick-edit" role="toolbar" aria-label="選択注釈の編集" hidden>
+                <span id="annot-quick-count"></span><input id="annot-quick-color" type="color" aria-label="選択注釈の線色">
+                <input id="annot-quick-width" type="number" min="0.5" max="20" step="0.5" aria-label="選択注釈の線幅">
+                <textarea id="annot-quick-text" aria-label="選択注釈の文字" rows="2" hidden></textarea>
+                <button id="annot-quick-copy" title="複製 (Ctrl/Cmd+D)">複製</button><button id="annot-quick-delete">削除</button>
+              </div>
               <!-- フローティングHUD: ページ / ズーム / ツール -->
               <div id="viewer-hud" style="display:none;">
-                <div class="hud-group" role="group" aria-label="ページ">
+                <div class="hud-group hud-pages" role="group" aria-label="ページ">
                   <button class="hud-btn" id="btn-prev" title="前のページ (↑)" disabled aria-label="前のページ">‹</button>
                   <span id="page-info" title="クリックしてページ番号を入力" role="button" tabindex="0">—</span>
                   <button class="hud-btn" id="btn-next" title="次のページ (↓)" disabled aria-label="次のページ">›</button>
