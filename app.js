@@ -2112,7 +2112,7 @@ async function generateReport(opts = {}) {
         }
       } catch { /* テキスト抽出不可は無視 */ }
 
-      const pageLabel = !state.pageMap && state.pageBOffset === 0 ? `Page ${pg + 1}` : `A p${pg + 1} ↔ B p${bpg + 1}`;
+      const pageLabel = !state.pageMap && state.pageBOffset === 0 ? `P${pg + 1}` : `A p${pg + 1} ↔ B p${bpg + 1}`;
       summaryRows.push(`<tr><td>${pageLabel}</td><td>${(res.count || 0).toLocaleString()}px</td><td>+${tIns} / −${tDel}</td></tr>`);
 
       sections.push(`
@@ -2931,8 +2931,8 @@ function buildThumbList(side) {
       <div class="thumb-img-placeholder" aria-hidden="true">📄</div>
       <div class="thumb-info">
         <div class="thumb-page-num">
+          <span class="thumb-number">${i + 1}</span>
           <span class="diff-dot" id="badge-${side}-${i}" title="差分あり" style="display:${state.diffPages.has(i) ? 'inline-block' : 'none'}"></span>
-          Page ${i + 1}
         </div>
       </div>`;
     const activate = () => {
@@ -3983,7 +3983,7 @@ function rebuildDiffSummaryPanel() {
     if (row.a === null) kinds.push('追加');
     else if (row.b === null) kinds.push('削除');
     if (state.scanErrors.has(i)) kinds.push('読み取り失敗');
-    const pageLabel = state.pageMap ? `A ${row.a === null ? '—' : row.a+1} ↔ B ${row.b === null ? '—' : row.b+1}` : `Page ${i+1}`;
+    const pageLabel = state.pageMap ? `A ${row.a === null ? '—' : row.a+1} ↔ B ${row.b === null ? '—' : row.b+1}` : `P${i+1}`;
     div.innerHTML = `<span class="diff-page-label">${pageLabel}</span>` + marks;
     div.setAttribute('aria-label', `${pageLabel}${pix?' 画像差分':''}${txt?' テキスト差分':''}`);
     const detail = document.createElement('span');
