@@ -29,7 +29,7 @@ const THUMB_SCALE = 0.12;
 // 埋め込み文字の微小変更は別系統のテキスト差分でも検出する。
 const DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1.0), 2.0);
 // レンダリング解像度(固定)。ズームに依存しないため差分結果が常に一定。
-const QUALITY_SCALES = { std: 2.0, high: 3.0 };
+const QUALITY_SCALES = { light: 2.0, std: 2.5, high: 3.0 };
 // 1キャンバスの画素数上限 (約16.7MP) — 大判PDFでのメモリ爆発/クラッシュを防ぐ
 const MAX_CANVAS_PIXELS = 4096 * 4096;
 // キャッシュ上限(片側あたり): 高解像度PDFでも常駐メモリを抑える。
@@ -774,16 +774,26 @@ function applyTransform() {
   if (zoomCombo && document.activeElement !== zoomCombo) zoomCombo.value = pct;
 }
 
+function availableFitSize() {
+  let width=viewContainer.clientWidth;
+  const height=viewContainer.clientHeight;
+  const rect=viewContainer.getBoundingClientRect();
+  for(const id of ['diff-summary-panel','text-view','annot-list-panel']) {
+    const panel=$(id);if(!panel)continue;
+    const box=panel.getBoundingClientRect();
+    if(box.width>0 && box.height>0 && box.left>rect.left && box.left<rect.right && box.right>=rect.right-2) width=Math.min(width,box.left-rect.left);
+  }
+  return {width:Math.max(1,width),height};
+}
+function fitTransform(size) {
+  const rs=state.renderScale || DPR;
+  const cw=(viewCanvas.width || 1)/rs, ch=(viewCanvas.height || 1)/rs;
+  const zoom=Math.max(.01,Math.min((size.width-40)/cw,(size.height-40)/ch,1));
+  return {zoom, x:(size.width-cw*zoom)/2,y:(size.height-ch*zoom)/2};
+}
 function fitToView() {
-  const rs = state.renderScale || DPR;
-  const cw = (viewCanvas.width || 1) / rs;
-  const ch = (viewCanvas.height || 1) / rs;
-  const vw = viewContainer.clientWidth;
-  const vh = viewContainer.clientHeight;
-  const margin = 40;
-  state.zoomFactor = Math.min((vw - margin) / cw, (vh - margin) / ch, 1.0);
-  state.panX = (vw - cw * state.zoomFactor) / 2;
-  state.panY = (vh - ch * state.zoomFactor) / 2;
+  const fit=fitTransform(availableFitSize());
+  state.zoomFactor=fit.zoom;state.panX=fit.x;state.panY=fit.y;
   applyTransform();
 }
 
@@ -4274,7 +4284,7 @@ if (qualitySelect) {
     state.lastDiffView = null;
     clearOffsetPreview();
     evictOtherScales(computeVisualScale());
-    setStatus(`画質: ${state.quality === 'high' ? '高 (3x)' : '標準 (2x)'}`, 3000);
+    setStatus(`画質: ${state.quality === 'high' ? '高 (3x)' : state.quality === 'light' ? '軽量 (2x)' : '標準 (2.5x)'}`, 3000);
     renderCurrentView();
   });
 }
@@ -4794,3 +4804,14 @@ document.addEventListener('keydown',e=>{
 
 $('annot-quick-width').addEventListener('change',e=>{const n=Number(e.target.value);if(n>=0.5&&n<=20){state.annotWidth=n;applyStyleToSelection({thickness:n});}});
 $('annot-quick-text').addEventListener('change',e=>{if(selectedAnnots().length===1 && state.selectedAnnot.type==='text')applyStyleToSelection({text:e.target.value});});
+
+let lastFitSize=availableFitSize();
+const fitResizeObserver=new ResizeObserver(()=>{
+  const next=availableFitSize();
+  if(next.width===lastFitSize.width && next.height===lastFitSize.height)return;
+  const previous=fitTransform(lastFitSize);
+  const fitted=Math.abs(state.zoomFactor-previous.zoom)<.001 && Math.abs(state.panX-previous.x)<2 && Math.abs(state.panY-previous.y)<2;
+  lastFitSize=next;
+  if(fitted && viewCanvas.style.display!=='none')fitToView();
+});
+for(const element of [viewContainer,$('diff-summary-panel'),$('text-view'),$('annot-list-panel')])if(element)fitResizeObserver.observe(element);
