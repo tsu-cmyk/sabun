@@ -52,6 +52,7 @@
 
 
 <select id="quality-select" class="tsel" title="レンダリング画質 — ズームしても差分結果は変わりません" aria-label="レンダリング画質">
+        <option value="light">画質: 軽量</option>
         <option value="std" selected>画質: 標準</option>
         <option value="high">画質: 高</option>
       </select>
@@ -444,7 +445,7 @@
         </ul>
         <h3>5. 差分検出のしくみ</h3>
         <ul>
-          <li>レンダリング解像度は固定（画質: 標準2x / 高3x）。<strong>ズームしても差分結果は変わりません</strong></li>
+          <li>レンダリング解像度は固定（画質: 軽量2x / 標準2.5x / 高3x）。<strong>ズームしても差分結果は変わりません</strong></li>
           <li>PDF内のコメント注釈は差分判定・比較ビューから常に除外されます</li>
           <li>A/B読込後、全ページを自動スキャン（画像＋テキスト）。橙ドット=画像差分 / 青ドット=テキスト差分</li>
           <li>「感度」変更後は差分一覧パネルの ⟳ で再スキャン</li>
