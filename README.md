@@ -1,1 +1,1 @@
-NOTE: Es una herramienta desarrollada mediante "vibe coding". Por favor, verifíquela bien antes de usarla.
+注：このツールは「バイブコーディング」を用いて開発されています。ご使用前に十分にご確認ください。
