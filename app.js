@@ -2,6 +2,12 @@
  * SABUN PWA — app.js (v2)
  **/
 
+import { refineComparison } from './lib/detail-comparison.mjs';
+import { PdfWorkGate } from './lib/pdf-work-gate.mjs';
+const pdfWorkGate = new PdfWorkGate();
+const resourceStats = {thumbRenders:0,cleanupRuns:0,cleanupFailures:0,scanSessions:0,scanSessionsReleased:0,scanCoarsePairs:0,scanFinePairs:0};
+import { DetailView, detailRect } from './lib/detail-view.mjs';
+import { pageFeature, suggestPageMap } from './lib/page-match.mjs';
 import { RegionCache } from './lib/region-cache.mjs';
 import { ViewCache } from './lib/view-cache.mjs';
 import * as pdfjsLib from './lib/pdf.mjs';
@@ -30,8 +36,8 @@ const THUMB_SCALE = 0.12;
 const DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1.0), 2.0);
 // レンダリング解像度(固定)。ズームに依存しないため差分結果が常に一定。
 const QUALITY_SCALES = { light: 2.0, std: 2.5, high: 3.0 };
-// 1キャンバスの画素数上限 (約16.7MP) — 大判PDFでのメモリ爆発/クラッシュを防ぐ
-const MAX_CANVAS_PIXELS = 4096 * 4096;
+// Bound full-page buffers to 6 MP; ordinary A4 at 3x remains unchanged.
+const MAX_CANVAS_PIXELS = 6 * 1024 * 1024;
 // キャッシュ上限(片側あたり): 高解像度PDFでも常駐メモリを抑える。
 const DEVICE_GB = navigator.deviceMemory || 4;
 // 表示キャッシュは小さく保つ。大きなPDFでは PDF.js の内部キャッシュも加わるため、
@@ -196,6 +202,8 @@ let _annotClipboard = null;
 const $ = id => document.getElementById(id);
 const viewContainer = $('view-container');
 const viewCanvas = $('view-canvas');
+const aoriCanvas = $('aori-canvas');
+const aoriDetailCanvas = $('aori-detail-canvas');
 const annotCanvas = $('annot-canvas');
 const viewPlaceholder = $('view-placeholder');
 const marqueeBox = $('marquee-box');
@@ -294,12 +302,39 @@ function updateWorkflowUI() {
     : state.scanStatus === 'complete' ? `比較完了 · 差分 ${allDiffPages().size}ページ${state.scanErrors.size ? ` ／ 読み取り失敗 ${state.scanErrors.size}ページ` : ''}`
     : '比較を準備しています…';
   $('scan-meter').value = state.scanStatus === 'complete' ? 100 : _scanPercent;
+  updateScanOverlay();
+}
+function updateScanOverlay() {
+  const overlay=$('scan-overlay');
+  if(!overlay)return;
+  const active=['running','paused','pending'].includes(state.scanStatus) && state.docA && state.docB;
+  overlay.hidden=!active;
+  if(!active)return;
+  const paused=state.scanStatus==='paused',pending=state.scanStatus==='pending';
+  $('scan-overlay-title').textContent=paused?'比較を一時停止しています':pending?'比較条件を更新しています':'全ページを比較しています';
+  $('scan-overlay-detail').textContent=paused?`続きから再開できます · ${_scanDetail}`:pending?'変更した条件で比較を開始します':_scanDetail;
+  $('scan-overlay-meter').value=_scanPercent;
+  $('scan-overlay-percent').textContent=`${Math.max(0,Math.min(100,_scanPercent))}%`;
+  const pause=$('btn-scan-overlay-pause');
+  pause.disabled=pending;
+  pause.textContent=paused?'続きから再開':'一時停止';
 }
 function setScanProgress(label, done, total, percent) {
   _scanDetail = `${label} ${done} / ${total}ページ`;
   _scanPercent = percent;
   scanProgress.style.width = `${percent}%`;
   updateWorkflowUI();
+}
+let _lastScanUiAt = 0;
+function setScanProgressResponsive(label, done, total, percent) {
+  const now = performance.now();
+  _scanDetail = `${label} ${done} / ${total}ページ`;
+  _scanPercent = percent;
+  if (done < total && now - _lastScanUiAt < 120) return false;
+  _lastScanUiAt = now;
+  scanProgress.style.width = `${percent}%`;
+  updateWorkflowUI();
+  return true;
 }
 function toggleScanPause() {
   if (state.scanStatus === 'running') state.scanStatus = 'paused';
@@ -393,10 +428,13 @@ function clampScaleForPage(page, scale) {
   const vp1 = page.getViewport({ scale: 1 });
   const px = vp1.width * vp1.height * scale * scale;
   if (px <= MAX_CANVAS_PIXELS) return scale;
-  return Math.max(0.5, Math.sqrt(MAX_CANVAS_PIXELS / (vp1.width * vp1.height)));
+  return Math.sqrt(MAX_CANVAS_PIXELS / (vp1.width * vp1.height));
 }
 
 async function renderPageData(page, scale, annotations) {
+  return pdfWorkGate.run(()=>renderPageDataUnlocked(page, scale, annotations));
+}
+async function renderPageDataUnlocked(page, scale, annotations) {
   const vp = page.getViewport({ scale });
   const w = Math.ceil(vp.width);
   const h = Math.ceil(vp.height);
@@ -434,9 +472,40 @@ async function scanRenderPage(doc, pageIndex, scanScale = SCAN_FINE_SCALE, clean
   }
 }
 
+// The first scan needs both pixels and normalized text. Keeping them in one
+// PDF work unit avoids opening and cleaning the same page twice.
+async function scanRenderPageBundle(side, doc, pageIndex, scanScale = SCAN_COARSE_SCALE) {
+  return pdfWorkGate.run(async () => {
+    const page = await doc.getPage(pageIndex + 1);
+    const scale = clampScaleForPage(page, scanScale);
+    try {
+      const content = await page.getTextContent();
+      const norm = content.items
+        .filter(item => typeof item.str === 'string')
+        .map(item => item.str)
+        .join('')
+        .replace(/\s+/g, '');
+      const img = await renderPageDataUnlocked(page, scale, false);
+      if (doc === (side === 'a' ? state.docA : state.docB)) {
+        const cache = normTextCache[side];
+        cache.set(pageIndex, norm);
+        while (cache.size > MAX_NORM_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+      }
+      return { img, norm };
+    } finally {
+      try { page.cleanup(); } catch { /* render cleanup may already have run */ }
+    }
+  });
+}
+
 async function renderThumbBlobURL(doc, pageIndex) {
+  return pdfWorkGate.run(()=>renderThumbBlobURLUnlocked(doc, pageIndex));
+}
+async function renderThumbBlobURLUnlocked(doc, pageIndex) {
+  resourceStats.thumbRenders++;
   const page = await doc.getPage(pageIndex + 1);
-  const vp = page.getViewport({ scale: THUMB_SCALE * DPR });
+  const unit=page.getViewport({scale:1});
+  const vp = page.getViewport({ scale: Math.min(THUMB_SCALE * DPR,64/Math.max(unit.width,unit.height)) });
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(vp.width);
   canvas.height = Math.ceil(vp.height);
@@ -521,8 +590,8 @@ function updateCacheLabel() {
   const textEntries = textCache.a.size + textCache.b.size;
   const heap = performance.memory && performance.memory.usedJSHeapSize
     ? ` / JS ${Math.round(performance.memory.usedJSHeapSize / 1048576)}MB` : '';
-  statusCache.textContent = `メモリ目安 ${mb}MB${heap}`;
-  statusCache.title = `SABUN画像キャッシュ: A ${Math.round(cacheBytes.a / 1048576)}MB / B ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)、比較結果 ${Math.round(comparisonCache.bytes / 1048576)}MB、テキスト詳細キャッシュ ${textEntries}ページ${heap}`;
+  statusCache.textContent = `画像キャッシュ ${mb}MB${heap}`;
+  statusCache.title = `アプリ全体の使用メモリではありません（PDF内部データ・高精細画像・サムネイル・GPU等は別）。SABUN画像キャッシュ: A ${Math.round(cacheBytes.a / 1048576)}MB / B ${Math.round(cacheBytes.b / 1048576)}MB (上限 各${Math.round(MAX_CACHE_BYTES / 1048576)}MB)、比較結果 ${Math.round(comparisonCache.bytes / 1048576)}MB、テキスト詳細キャッシュ ${textEntries}ページ${heap}`;
 }
 
 function runtimeMemoryNote() {
@@ -532,13 +601,50 @@ function runtimeMemoryNote() {
   return `メモリ目安: キャッシュ ${cached}MB${heap}`;
 }
 
+function releaseDocumentWorkingSet(docs) {
+  return pdfWorkGate.maintain(async()=>{
+    for(const doc of docs){
+      if(!doc)continue;
+      try{await doc.cleanup();resourceStats.cleanupRuns++;}catch(error){resourceStats.cleanupFailures++;console.warn('PDF cache cleanup failed',error);}
+    }
+    updateCacheLabel();
+  });
+}
+
 function releasePdfWorkingSet() {
-  // PDF.js のページごとの描画・演算子キャッシュを、全件スキャン後に解放する。
-  // 表示中のページは必要になった時に再生成されるため、100ページ級でも常駐を避けられる。
-  for (const doc of [state.docA, state.docB]) {
-    try { Promise.resolve(doc?.cleanup()).catch(() => {}); } catch { /* cleanup 非対応のPDFは無視 */ }
+  return releaseDocumentWorkingSet([state.docA,state.docB]);
+}
+
+// Full-document scanning uses disposable PDF.js documents. Page proxies,
+// operator lists and decoded image resources accumulated by the scan can then
+// be released as one unit, while the interactive documents retain only pages
+// that the user actually viewed.
+async function openScanSession(fallbackA, fallbackB) {
+  if (!state.fileA || !state.fileB || typeof URL?.createObjectURL !== 'function') {
+    return {docA:fallbackA,docB:fallbackB,owned:false,urls:[]};
   }
-  updateCacheLabel();
+  const urls=[];let docA=null,docB=null;
+  try {
+    const urlA=URL.createObjectURL(state.fileA);urls.push(urlA);
+    docA=await pdfjsLib.getDocument({url:urlA,...PDF_LOAD_OPTS}).promise;
+    const urlB=URL.createObjectURL(state.fileB);urls.push(urlB);
+    docB=await pdfjsLib.getDocument({url:urlB,...PDF_LOAD_OPTS}).promise;
+    resourceStats.scanSessions++;
+    return {docA,docB,owned:true,urls};
+  } catch {
+    try{await docA?.destroy();}catch{}
+    try{await docB?.destroy();}catch{}
+    urls.forEach(url=>URL.revokeObjectURL(url));
+    return {docA:fallbackA,docB:fallbackB,owned:false,urls:[]};
+  }
+}
+
+async function closeScanSession(session) {
+  if(!session?.owned)return;
+  try{await session.docA.destroy();}catch{}
+  try{await session.docB.destroy();}catch{}
+  session.urls.forEach(url=>URL.revokeObjectURL(url));
+  resourceStats.scanSessionsReleased++;
 }
 
 /**
@@ -551,6 +657,15 @@ function releasePdfWorkingSet() {
 const pendingPageRenders = new WeakMap();
 async function getOrRender(side, idx, scale, annOverride = null) {
   const doc = side === 'a' ? state.docA : state.docB;
+  if (idx < 0) {
+    const other = side === 'a' ? 'b' : 'a';
+    const otherIndex = other === 'a' ? state.pageA : state.pageB;
+    if(otherIndex < 0) throw new Error('表示するページがありません');
+    const reference = await getOrRender(other, otherIndex, scale, false);
+    const img = new ImageData(reference.img.width, reference.img.height);
+    img.data.fill(255);
+    return {img, scale:reference.scale, reqScale:scale, virtualBlank:true};
+  }
   const ann = annOverride !== null ? annOverride : (side === 'a' ? state.showAnnA : state.showAnnB);
   const key = `${idx}|${scale}|${ann ? 1 : 0}`;
   const map = side === 'a' ? cacheA : cacheB;
@@ -579,6 +694,7 @@ const _offsetCanvas = document.createElement('canvas');
 const _offsetCanvasTmp = document.createElement('canvas');
 
 function alignBToA(eb, ea) {
+  if(ea.virtualBlank || eb.virtualBlank) return eb.img;
   const dx = Math.round(state.offsetDx * ea.scale);
   const dy = Math.round(state.offsetDy * ea.scale);
   const sameScale = Math.abs(ea.scale - eb.scale) < 1e-6;
@@ -728,7 +844,7 @@ function drawRegionOverlay(ctx) {
     // 半透明の塗り + 破線枠で領域を示す (控えめ)
     ctx.fillStyle = 'rgba(255, 212, 0, 0.09)';
     ctx.fillRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
-    ctx.strokeStyle = i === state.regionIdx ? 'rgba(255, 80, 80, 0.95)' : 'rgba(255, 212, 0, 0.8)';
+    ctx.strokeStyle = i === state.regionIdx ? 'rgba(255, 230, 40, 1)' : 'rgba(255, 212, 0, 0.8)';
     ctx.lineWidth = Math.max(1.25, Math.round(DPR * (i === state.regionIdx ? 1.6 : 0.9) * 2) / 2);
     ctx.setLineDash([6 * DPR, 4 * DPR]);
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
@@ -738,7 +854,7 @@ function drawRegionOverlay(ctx) {
       const lx = Math.max(0, r.x);
       const ly = Math.max(0, r.y - fs * 1.3);
       ctx.setLineDash([]);
-      ctx.fillStyle = i === state.regionIdx ? 'rgba(255, 80, 80, 1)' : 'rgba(255, 212, 0, 0.95)';
+      ctx.fillStyle = i === state.regionIdx ? 'rgba(255, 230, 40, 1)' : 'rgba(255, 212, 0, 0.95)';
       ctx.fillRect(lx, ly, tw, fs * 1.25);
       ctx.fillStyle = '#000';
       ctx.fillText(label, lx + fs * 0.3, ly + fs * 0.12);
@@ -749,6 +865,8 @@ function drawRegionOverlay(ctx) {
 
 function showPlaceholder() {
   viewCanvas.style.display = 'none';
+  aoriCanvas.style.display = 'none';
+  clearAoriDetailSurface();
   annotCanvas.style.display = 'none';
   viewPlaceholder.style.display = 'flex';
   const hud = $('viewer-hud');
@@ -760,11 +878,14 @@ function showTextView(on) {
 }
 
 function applyTransform() {
+  if(state.activeSubTab==='aori')clearAoriDetailSurface();
+  if(typeof detailView !== 'undefined') detailView.schedule();
   if (viewCanvas.style.display === 'none') return;
   const rs = state.renderScale || DPR;
   const compensate = state.zoomFactor / (rs / DPR);
   const tf = `translate(${Math.round(state.panX)}px, ${Math.round(state.panY)}px) scale(${compensate})`;
   viewCanvas.style.transform = tf;
+  aoriCanvas.style.transform = tf;
   annotCanvas.style.transform = tf;
   if (locateMarker) locateMarker.classList.remove('visible');
   const pct = Math.round(state.zoomFactor * 100) + '%';
@@ -816,7 +937,9 @@ function zoomCenterBy(factor) {
   zoomAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
 }
 
-function computeVisualScale() {
+function computeVisualScale(mode = state.activeSubTab) {
+  // Use the proven high-resolution raster grid for standard comparison, too.
+  if(state.quality === 'std' && DIFF_TABS.includes(mode))return QUALITY_SCALES.high;
   return QUALITY_SCALES[state.quality];
 }
 
@@ -1097,7 +1220,7 @@ function shapeSide(shape) {
 }
 // 描画開始位置からサイドを決定 (並列タブは左右で自動判定)
 function pickDrawSide() {
-  return state.activeSubTab === 'b' ? 'b' : 'a';
+  return state.activeSubTab === 'b' ? 'b' : state.activeSubTab === 'a' ? 'a' : state.pageA < 0 ? 'b' : 'a';
 }
 // 表示中の注釈サイド一覧
 function visibleAnnotSides() {
@@ -1365,7 +1488,7 @@ function openAnnotTextInput(cssX, cssY, ix, iy) {
       x1: pt.x, y1: pt.y, x2: pt.x + wPt, y2: pt.y - hPt,
       text: txt, fontSize,
     };
-    const targets = annotTargetSides();
+    const targets = annotTargetSides().filter(side=>annotPage(side)>=0);
     const added = [];
     let lastShape = null;
     for (const side of targets) {
@@ -1535,10 +1658,10 @@ function regionKey(a, b, scale) {
   return JSON.stringify([a,b,scale,state.sensitivity,state.offsetDx,state.offsetDy]);
 }
 async function computeRegionsForPage(pageIdx, bIdx = bPageFor(pageIdx), prepared = null) {
-  const visualScale = computeVisualScale();
+  const visualScale = computeVisualScale('highlight');
   const key = regionKey(pageIdx,bIdx,visualScale);
   const docA=state.docA, docB=state.docB;
-  const current=()=>docA===state.docA && docB===state.docB && regionKey(pageIdx,bIdx,computeVisualScale())===key;
+  const current=()=>docA===state.docA && docB===state.docB && regionKey(pageIdx,bIdx,computeVisualScale('highlight'))===key;
   return regionCache.obtain(key, async()=>{
     if(!current())throw new Error('領域検出の条件が変更されました');
     const [ea,eb]=prepared || await Promise.all([
@@ -1606,7 +1729,7 @@ async function autoAnnotateRegions(scope = 'page') {
     pages = [...state.diffPages].filter(p => p < state.totalA && bPageFor(p)>=0 && bPageFor(p)<state.totalB).sort((a, b) => a - b);
     if (!pages.length) { setStatus('差分ページがありません(先にスキャンを完了してください)', 4000); return 0; }
   } else {
-    if (state.pageMap && bPageFor(state.pageA)!==state.pageB) { setStatus('対応のないページには差分領域を自動付与できません。',4000);return 0; }
+    if (state.pageA < 0 || state.pageB < 0 || (state.pageMap && bPageFor(state.pageA)!==state.pageB)) { setStatus('対応のないページには差分領域を自動付与できません。',4000);return 0; }
     pages = [state.pageA];
   }
 
@@ -1886,6 +2009,7 @@ function updateAutoAlignButton() {
 }
 
 async function autoAlignOffset() {
+  if(state.pageA < 0 || state.pageB < 0) {setStatus('追加・削除ページの位置合わせは不要です。',3000);return false;}
   if (!state.docA || !state.docB) { setStatus('A・B両方のPDFが必要です', 3000); return false; }
   const w = ensureWorker();
   if (!w) { setStatus('Workerが利用できないため自動位置合わせは使えません', 4000); return false; }
@@ -1936,6 +2060,7 @@ function updatePageLinkButton() {
 }
 
 function togglePageLink() {
+  if(state.pageA < 0 || state.pageB < 0) {setStatus('両側にページがある位置で対応を固定してください。',3000);return;}
   if (!state.docA || !state.docB) { setStatus('A・B両方のPDFが必要です', 3000); return; }
   if (state.pageBOffset === 0) {
     const off = state.pageB - state.pageA;
@@ -2307,6 +2432,7 @@ function annotMouseDown(ix, iy, cssX, cssY, altKey = false, shiftKey = false) {
     drawAnnotsOverlay();
     return !!hit;
   }
+  if (annotPage(pickDrawSide()) < 0) {setStatus('空白側には注釈を追加できません。',3000);return true;}
   if (tool === 'text') {
     state.annotDraftSide = pickDrawSide();
     openAnnotTextInput(cssX, cssY, ix, iy);
@@ -2376,7 +2502,7 @@ function annotMouseUp() {
     const big = Math.abs(s.x2 - s.x1) > 3 || Math.abs(s.y2 - s.y1) > 3;
     if (big) {
       const draftSide = state.annotDraftSide;
-      const targets = annotTargetSides();
+      const targets = annotTargetSides().filter(side=>annotPage(side)>=0);
       const added = [];
       let lastShape = null;
       for (const side of targets) {
@@ -2410,9 +2536,7 @@ function annotMouseUp() {
 // ─────────────────────────────────────────────────────────
 // MOUSE EVENTS
 // ─────────────────────────────────────────────────────────
-let regionClickStart = null;
 viewContainer.addEventListener('mousedown', e => {
-  regionClickStart = e.target === viewCanvas && e.button === 0 ? {x:e.clientX,y:e.clientY} : null;
   const mode = state.activeMode;
   const rect = viewContainer.getBoundingClientRect();
   const mouseX = e.clientX - rect.left;
@@ -2446,8 +2570,6 @@ viewContainer.addEventListener('mousedown', e => {
     });
   } else if (mode === 'cursor' && state.activeSubTab === 'split' && state.pair) {
     e.preventDefault();
-    const point = containerToImage(mouseX, mouseY);
-    if (state.showRegions && !_activeViews && hitRegion(point.ix, point.iy) >= 0) return;
     state.splitDragging = true;
     state.splitPos = Math.max(0, Math.min(1, containerToImage(mouseX, mouseY).ix / state.pair.w));
     compositeSplit();
@@ -2551,20 +2673,6 @@ window.addEventListener('mouseup', e => {
 });
 
 viewContainer.addEventListener('click', e => {
-  const start = regionClickStart;
-  regionClickStart = null;
-  if (e.target === viewCanvas && start && Math.hypot(e.clientX-start.x,e.clientY-start.y) < 4
-      && state.activeMode === 'cursor' && !state.annotTool && !state.tempModeActive
-      && state.showRegions && !_activeViews) {
-    const rect = viewContainer.getBoundingClientRect();
-    const {ix, iy} = containerToImage(e.clientX-rect.left,e.clientY-rect.top);
-    const index = hitRegion(ix, iy);
-    if (index >= 0) {
-      if (!diffPanel.classList.contains('visible')) toggleDiffPanel();
-      selectRegion(index, false);
-      return;
-    }
-  }
   // 一時モード(Ctrl+Space等)のズームクリックは注釈ツール中でも有効
   if (state.annotTool && !state.tempModeActive && state.activeMode === 'cursor') return;
   if (state.activeMode === 'zoom_in') zoomAtPoint(e.clientX, e.clientY, 1.25);
@@ -2624,7 +2732,10 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  if (e.target.closest('input, textarea, select, button, a') || e.target.isContentEditable) return;
+  // Text editing keeps native keys; focused toolbar buttons do not disable shortcuts.
+  if (e.target.closest('textarea, input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]):not([type=submit])') || e.target.isContentEditable) return;
+  if (!e.ctrlKey && !e.metaKey && e.target.closest('select, input[type=range]') && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','Enter','Escape',' '].includes(e.key)) return;
+  if ((e.key === 'Enter' || e.code === 'Space') && e.target.closest('button, a, input, [role=button]')) return;
 
   state.keysDown.add(e.key);
   updateModeFromKeys();
@@ -2726,7 +2837,7 @@ document.addEventListener('keydown', e => {
 
   // サブタブ切替 1-6
   if (!ctrl && !alt && /^[1-6]$/.test(e.key)) {
-    switchSubTab(SUB_TAB_KEYS[parseInt(e.key, 10) - 1]); return;
+    e.preventDefault();switchSubTab(SUB_TAB_KEYS[parseInt(e.key, 10) - 1]); return;
   }
 
   // 7: テキスト差分パネル / 8: 差分ページ一覧パネル (どちらもタブ非依存)
@@ -2794,6 +2905,7 @@ async function computeFingerprint(ab) {
 // ─────────────────────────────────────────────────────────
 const loadVersions = { a: 0, b: 0 };
 async function loadPDF(side, file) {
+  if(typeof detailView !== 'undefined') detailView.clear();
   const version = ++loadVersions[side];
   const loadStarted = performance.now();
   _loadingSides.add(side);
@@ -2905,7 +3017,9 @@ function updateOpenChip(side) {
 // ─────────────────────────────────────────────────────────
 const thumbObservers = { a: null, b: null };
 const thumbEntries = { a: new Map(), b: new Map() };
-const MAX_THUMB_ENTRIES = 24;
+const MAX_THUMB_ENTRIES = 512;
+const thumbVisible = {a:new Set(),b:new Set()};
+const thumbPending = new WeakSet();
 let _thumbChain = Promise.resolve();
 
 function buildThumbList(side) {
@@ -2915,17 +3029,18 @@ function buildThumbList(side) {
 
   for(const entry of thumbEntries[side].values()) URL.revokeObjectURL(entry.url);
   thumbEntries[side].clear();
+  thumbVisible[side].clear();
   if (thumbObservers[side]) { thumbObservers[side].disconnect(); thumbObservers[side] = null; }
   list.innerHTML = '';
   if (!doc) return;
 
   const io = new IntersectionObserver(entries => {
     for (const en of entries) {
-      if (!en.isIntersecting) continue;
-      io.unobserve(en.target);
+      if (!en.isIntersecting){thumbVisible[side].delete(en.target);continue;}
+      thumbVisible[side].add(en.target);
       queueThumb(side, doc, parseInt(en.target.dataset.page, 10), en.target);
     }
-  }, { root: list, rootMargin: '300px' });
+  }, { root: list, rootMargin: '100px' });
   thumbObservers[side] = io;
 
   const curPage = side === 'a' ? state.pageA : state.pageB;
@@ -2947,6 +3062,7 @@ function buildThumbList(side) {
       </div>`;
     const activate = () => {
       if (state.pageMap) { const a = side === 'a' ? i : state.pageMap.indexOf(i); goToPage(a < 0 ? state.totalA+i : a); return; }
+      if(state.docA && state.docB && state.pageBOffset===0){goToPage(i);return;}
       if (side === 'a') state.pageA = i; else state.pageB = i;
       syncPageIndex(); renderCurrentView(true);
     };
@@ -2961,16 +3077,19 @@ function buildThumbList(side) {
 }
 
 function queueThumb(side, doc, i, itemEl) {
-  _thumbChain = _thumbChain.then(async () => {
+  if(thumbPending.has(itemEl) || thumbEntries[side].has(i) || thumbEntries[side].size>=MAX_THUMB_ENTRIES)return;
+  thumbPending.add(itemEl);
+  _thumbChain = _thumbChain.catch(()=>{}).then(async () => {
     const cur = side === 'a' ? state.docA : state.docB;
     if (cur !== doc || !itemEl.isConnected) return;
-    while (_activeViews || performance.now() - _viewRequestedAt < 160) {
+    while (_activeViews || state.scanStatus==='running' || (state.activeSubTab==='aori' && state.aoriTimer) || performance.now() - _viewRequestedAt < 160) {
       await new Promise(resolve => setTimeout(resolve, 50));
       if (doc !== (side === 'a' ? state.docA : state.docB) || !itemEl.isConnected) return;
     }
     try {
+      if(!thumbVisible[side].has(itemEl) || thumbEntries[side].size>=MAX_THUMB_ENTRIES)return;
       const url = await renderThumbBlobURL(doc, i);
-      if (!itemEl.isConnected) { URL.revokeObjectURL(url); return; }
+      if (!itemEl.isConnected || doc !== (side==='a'?state.docA:state.docB)) { URL.revokeObjectURL(url); return; }
       const ph = itemEl.querySelector('.thumb-img-placeholder');
       if (ph) {
         const img = document.createElement('img');
@@ -2979,20 +3098,9 @@ function queueThumb(side, doc, i, itemEl) {
       }
       const entries = thumbEntries[side];
       entries.set(i, { url, itemEl });
-      while (entries.size > MAX_THUMB_ENTRIES) {
-        const [oldPage, old] = entries.entries().next().value;
-        entries.delete(oldPage);
-        URL.revokeObjectURL(old.url);
-        const oldImg = old.itemEl.querySelector('.thumb-img');
-        if (oldImg) {
-          const placeholder = document.createElement('div');
-          placeholder.className = 'thumb-img-placeholder'; placeholder.setAttribute('aria-hidden', 'true'); placeholder.textContent = '📄';
-          oldImg.replaceWith(placeholder);
-          thumbObservers[side]?.observe(old.itemEl);
-        }
-      }
+      thumbObservers[side]?.unobserve(itemEl);
     } catch { /* ignore */ }
-  });
+  }).finally(()=>thumbPending.delete(itemEl));
 }
 
 function updateThumbHighlight(side) {
@@ -3026,6 +3134,9 @@ const dmp = (typeof diff_match_patch !== 'undefined') ? new diff_match_patch() :
 if (dmp) dmp.Diff_Timeout = 2;
 
 async function extractPageTextData(doc, idx) {
+  return pdfWorkGate.run(()=>extractPageTextDataUnlocked(doc, idx));
+}
+async function extractPageTextDataUnlocked(doc, idx) {
   const page = await doc.getPage(idx + 1);
   const vp1 = page.getViewport({ scale: 1 });
   const tc = await page.getTextContent();
@@ -3057,6 +3168,7 @@ async function extractPageTextData(doc, idx) {
 }
 
 async function getPageTextData(side, idx) {
+  if(idx < 0) return {text:'',map:[],pageH:0,pageW:0};
   const cache = textCache[side];
   if (cache.has(idx)) {
     const hit = cache.get(idx);
@@ -3080,7 +3192,14 @@ async function getPageTextNorm(side, idx) {
     return hit;
   }
   const doc = side === 'a' ? state.docA : state.docB;
-  const norm = (await getPageTextData(side, idx)).text.replace(/\s+/g, '');
+  // The all-page scan needs text only, not a geometry object for every glyph.
+  const norm = await pdfWorkGate.run(async()=>{
+    const page=await doc.getPage(idx+1);
+    try{
+      const content=await page.getTextContent();
+      return content.items.filter(item=>typeof item.str==='string').map(item=>item.str).join('').replace(/\s+/g,'');
+    }finally{try{page.cleanup();}catch{}}
+  });
   if (doc !== (side === 'a' ? state.docA : state.docB)) return norm;
   cache.set(idx, norm);
   while (cache.size > MAX_NORM_TEXT_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
@@ -3158,10 +3277,6 @@ async function renderTextDiff(token) {
     textStats.textContent = '—';
     return;
   }
-  if (state.pageMap && bPageFor(state.pageA) !== state.pageB) {
-    showTextMessage('このページは追加・削除ページです。対応するテキスト比較はありません。');
-    textStats.textContent='対応なし'; return;
-  }
   if (!dmp) {
     showTextMessage('diff_match_patch ライブラリが読み込まれていません。');
     if (textPages) textPages.textContent = '読み込みエラー';
@@ -3186,7 +3301,7 @@ async function renderTextDiff(token) {
   busyHide();
   if (token !== _textToken || !state.textPanelOpen) return;
 
-  const pageLabel = `A:p${state.pageA + 1} ↔ B:p${state.pageB + 1}`;
+  const pageLabel = `A:${state.pageA < 0 ? '—' : 'p'+(state.pageA+1)} ↔ B:${state.pageB < 0 ? '—' : 'p'+(state.pageB+1)}`;
   if (textPages) textPages.textContent = pageLabel;
   if (!da.text.trim() && !db.text.trim()) {
     showTextMessage('このページにはテキストがありません(画像のみのPDFの可能性があります)。');
@@ -3384,6 +3499,7 @@ del{background:#ffd9d9;border-radius:2px;}
 let _scanToken = 0;
 
 async function scanComparePixels(ia, ib, threshold = SCAN_GRAY_THRESHOLDS[state.sensitivity], minBlockPixels = MIN_DIFF_BLOCK_PIXELS[state.sensitivity]) {
+  if(ia.width!==ib.width || ia.height!==ib.height)return true;
   const w = ensureWorker();
   if (w) {
     const id = ++_wseq;
@@ -3402,7 +3518,10 @@ async function scanComparePixels(ia, ib, threshold = SCAN_GRAY_THRESHOLDS[state.
       });
       return m.diff;
     } catch {
-      return null;
+      // Transferred buffers are detached and cannot be checked synchronously.
+      // Conservatively send this page to confirmation instead of cloning both
+      // full images merely to retain a failure fallback.
+      return true;
     }
   }
   return hasDiffSync(ia, ib, threshold, 0, minBlockPixels);
@@ -3412,9 +3531,13 @@ async function startDiffScan() {
   if (!state.docA || !state.docB) return;
   if (_rescanTimer) { clearTimeout(_rescanTimer); _rescanTimer = null; }
   const token = ++_scanToken;
-  const docA = state.docA, docB = state.docB;
+  let docA = state.docA, docB = state.docB;
   state.scanStatus = 'running';
-  _scanDetail = '候補ページを調べています';
+  resourceStats.scanCoarsePairs=0;
+  resourceStats.scanFinePairs=0;
+  if(typeof detailView !== 'undefined')detailView.clear();
+  clearAoriDetailSurface();
+  _scanDetail = '比較用PDFを準備しています';
   _scanPercent = 0;
   state.scanErrors.clear();
   scanProgress.style.width = '0%';
@@ -3439,10 +3562,18 @@ async function startDiffScan() {
     return;
   }
 
-  setStatus('二段階スキャン: 候補ページを抽出中...');
+  setStatus('省メモリスキャン用のPDFを準備中...');
+  const scanSession=await openScanSession(docA,docB);
+  if(token!==_scanToken){await closeScanSession(scanSession);return;}
+  docA=scanSession.docA;docB=scanSession.docB;
+  try {
+  _scanDetail='候補ページを調べています';
+  updateWorkflowUI();
+  setStatus('省メモリスキャン: 候補ページを抽出中...');
   scanProgress.style.width = '0%';
   const hasOffset = Math.round(state.offsetDx) !== 0 || Math.round(state.offsetDy) !== 0;
   const candidates = new Set();
+  let adaptiveFine = false;
 
   // 第1段階: 0.5xでページをふるいに掛ける。テキストはここで必ず照合するため、
   // 極小文字の変更を粗い画像比較だけで見落とさない。
@@ -3450,36 +3581,43 @@ async function startDiffScan() {
     const [i] = pairs[pairIndex];
     if (!await waitForScanTurn(token)) return;
     try {
-      let ia = await scanRenderPage(docA, i, SCAN_COARSE_SCALE, true);
+      const scanScale=adaptiveFine?SCAN_FINE_SCALE:SCAN_COARSE_SCALE;
+      if(adaptiveFine)resourceStats.scanFinePairs++;else resourceStats.scanCoarsePairs++;
+      const pageA = await scanRenderPageBundle('a', docA, i, scanScale);
+      let ia = pageA.img;
       if (token !== _scanToken) return;
       if (!await waitForScanTurn(token)) return;
-      let ib = await scanRenderPage(docB, bPageFor(i), SCAN_COARSE_SCALE, true);
+      const pageB = await scanRenderPageBundle('b', docB, bPageFor(i), scanScale);
+      let ib = pageB.img;
       if (token !== _scanToken) return;
       if (hasOffset || ia.width !== ib.width || ia.height !== ib.height) {
-        ib = alignBToA({ img: ib, scale: SCAN_COARSE_SCALE }, { img: ia, scale: SCAN_COARSE_SCALE });
+        ib = alignBToA({ img: ib, scale: scanScale }, { img: ia, scale: scanScale });
       }
       if (!await waitForScanTurn(token)) return;
-      const coarse = await scanComparePixels(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], MIN_DIFF_BLOCK_PIXELS[state.sensitivity]);
-      if (coarse === null
-        ? hasDiffSync(ia, ib, SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity], 0, MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
-        : coarse) candidates.add(i);
+      const threshold=adaptiveFine?SCAN_GRAY_THRESHOLDS[state.sensitivity]:SCAN_COARSE_GRAY_THRESHOLDS[state.sensitivity];
+      const difference = await scanComparePixels(ia, ib, threshold, MIN_DIFF_BLOCK_PIXELS[state.sensitivity]);
+      const differs=difference===null
+        ?hasDiffSync(ia,ib,threshold,0,MIN_DIFF_BLOCK_PIXELS[state.sensitivity])
+        :difference;
+      if(differs){if(adaptiveFine)state.diffPages.add(i);else candidates.add(i);}
+      if (pageA.norm !== pageB.norm) {
+        state.textDiffPages.add(i);
+        if(!adaptiveFine)candidates.add(i);
+      }
     } catch {
       // 描画不能ページは第2段階に回し、最終的に差分として報告する。
       candidates.add(i);
     }
 
     if (token !== _scanToken) return;
-    try {
-      const [na, nb] = await Promise.all([getPageTextNorm('a', i), getPageTextNorm('b', bPageFor(i))]);
-      if (token !== _scanToken) return;
-      if (na !== nb) { state.textDiffPages.add(i); candidates.add(i); }
-    } catch { if (token === _scanToken) state.scanErrors.add(i); }
-
     if (token !== _scanToken) return;
-    setScanProgress('候補の確認', pairIndex + 1, total, Math.round((pairIndex + 1) / total * 55));
+    const progressUpdated = setScanProgressResponsive('候補の確認', pairIndex + 1, total, Math.round((pairIndex + 1) / total * 55));
+    const sampled=pairIndex+1;
+    if(!adaptiveFine && sampled>=12 && candidates.size/sampled>=0.35)adaptiveFine=true;
+    if(sampled%32===0)await releaseDocumentWorkingSet([docA,docB]);
     const done = pairIndex + 1;
     const avg = (performance.now() - scanStartedAt) / done;
-    setStatus(`第1段階: ${done} / ${total} (候補: ${candidates.size} / テキスト差分: ${state.textDiffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
+    if (progressUpdated) setStatus(`${adaptiveFine?'確定比較へ自動切替':'候補抽出'}: ${done} / ${total} (再確認: ${candidates.size} / 確定: ${state.diffPages.size} / テキスト差分: ${state.textDiffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
     await new Promise(r => setTimeout(r, 0));
   }
 
@@ -3487,6 +3625,7 @@ async function startDiffScan() {
   const candidateList = [...candidates].sort((a, b) => a - b);
   for (let n = 0; n < candidateList.length; n++) {
     const i = candidateList[n];
+    resourceStats.scanFinePairs++;
     if (!await waitForScanTurn(token)) return;
     try {
       let ia = await scanRenderPage(docA, i, SCAN_FINE_SCALE, true);
@@ -3508,11 +3647,12 @@ async function startDiffScan() {
       state.scanErrors.add(i);
     }
     if (token !== _scanToken) return;
+    if((n+1)%32===0)await releaseDocumentWorkingSet([docA,docB]);
     const progress = 55 + Math.round((n + 1) / Math.max(1, candidateList.length) * 45);
-    setScanProgress('差分の確定', n + 1, candidateList.length, progress);
+    const progressUpdated = setScanProgressResponsive('差分の確定', n + 1, candidateList.length, progress);
     const elapsed = performance.now() - scanStartedAt;
     const avg = elapsed / Math.max(1, total + n + 1);
-    setStatus(`第2段階: ${n + 1} / ${candidateList.length} (画像差分: ${state.diffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
+    if (progressUpdated) setStatus(`第2段階: ${n + 1} / ${candidateList.length} (画像差分: ${state.diffPages.size} / 平均 ${(avg / 1000).toFixed(1)}秒/頁 / ${runtimeMemoryNote()})`);
     await new Promise(r => setTimeout(r, 0));
   }
   if (token !== _scanToken) return;
@@ -3526,16 +3666,24 @@ async function startDiffScan() {
     for (let i = total; i < maxTotal; i++) state.diffPages.add(i);
   }
 
+  // Dispose the scan-only PDF workers before publishing completion. This keeps
+  // thumbnails and interactive rendering from competing with teardown.
+  await closeScanSession(scanSession);
+  scanSession.owned=false;
   state.scanStatus = 'complete';
   recordTiming('fullScan', scanStartedAt);
+  if(typeof detailView !== 'undefined')detailView.schedule();
   scanProgress.style.width = '0%';
-  releasePdfWorkingSet();
+  await releaseDocumentWorkingSet([docA,docB]);
   const mapNote = off !== 0 ? `(ページ対応 Δ${off > 0 ? '+' : ''}${off}) ` : '';
   const pageCountNote = mapNote + (state.totalA !== state.totalB && off === 0 ? `(ページ数不一致 A:${state.totalA} / B:${state.totalB}) ` : '');
   setStatus(`${pageCountNote}画像差分 ${state.diffPages.size}ページ / テキスト差分 ${state.textDiffPages.size}ページ${state.scanErrors.size ? ` / 要確認 ${state.scanErrors.size}ページ（読み取り失敗）` : ''}`, 8000);
   refreshDiffBadges();
   rebuildDiffSummaryPanel();
   updateDiffCountBadge();
+  } finally {
+    await closeScanSession(scanSession);
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3574,13 +3722,48 @@ function drawCornerLabel(ctx, txt, side = 'left') {
   ctx.restore();
 }
 
-function drawPairFrame(showB) {
+function drawPairFrame(showB, initialize = false) {
   const pr = state.pair;
   if (!pr) return;
-  const ctx = setupCanvas(pr.w, pr.h, pr.rs);
+  const ready=!initialize && viewCanvas.width===pr.w && viewCanvas.height===pr.h && state.renderScale===pr.rs && viewCanvas.style.display==='block';
+  const ctx = ready ? viewCanvas.getContext('2d') : setupCanvas(pr.w, pr.h, pr.rs);
+  if(ready && typeof detailView !== 'undefined')detailView.repaint();
   ctx.drawImage(showB ? pr.bmpB : pr.bmpA, 0, 0);
   if (state.showRegions && state.regions && state.regions.list.length) drawRegionOverlay(ctx);
   drawCornerLabel(ctx, showB ? 'B' : 'A');
+}
+
+function prepareAoriFrames() {
+  const pr = state.pair;
+  if (!pr) return;
+  const base = setupCanvas(pr.w, pr.h, pr.rs);
+  base.drawImage(pr.bmpA, 0, 0);
+  if (state.showRegions && state.regions?.list.length) drawRegionOverlay(base);
+  drawCornerLabel(base, 'A');
+
+  if (aoriCanvas.width !== pr.w) aoriCanvas.width = pr.w;
+  if (aoriCanvas.height !== pr.h) aoriCanvas.height = pr.h;
+  aoriCanvas.style.width = viewCanvas.style.width;
+  aoriCanvas.style.height = viewCanvas.style.height;
+  aoriCanvas.style.transform = viewCanvas.style.transform;
+  const overlay = aoriCanvas.getContext('2d');
+  overlay.clearRect(0, 0, pr.w, pr.h);
+  overlay.drawImage(pr.bmpB, 0, 0);
+  if (state.showRegions && state.regions?.list.length) drawRegionOverlay(overlay);
+  drawCornerLabel(overlay, 'B');
+  aoriCanvas.style.display = 'block';
+  aoriCanvas.style.visibility = 'hidden';
+}
+
+function showAoriFrame(showB) {
+  aoriCanvas.style.visibility = showB ? 'visible' : 'hidden';
+  aoriDetailCanvas.style.visibility = showB ? 'visible' : 'hidden';
+}
+
+function clearAoriDetailSurface() {
+  aoriDetailCanvas.style.display='none';
+  aoriDetailCanvas.style.visibility='hidden';
+  if(aoriDetailCanvas.width||aoriDetailCanvas.height)aoriDetailCanvas.width=aoriDetailCanvas.height=0;
 }
 
 function compositeSplit() {
@@ -3617,19 +3800,33 @@ function compositeSplit() {
 function restartAoriTimer() {
   if (state.aoriTimer) clearInterval(state.aoriTimer);
   state.aoriTimer = setInterval(() => {
-    state.aoriFlag = !state.aoriFlag;
-    drawPairFrame(state.aoriFlag);
+    if(document.hidden || _activeViews || state.aoriFrame)return;
+    state.aoriFrame=requestAnimationFrame(()=>{
+      state.aoriFrame=null;
+      if(!state.aoriTimer || document.hidden || _activeViews)return;
+      state.aoriFlag = !state.aoriFlag;
+      showAoriFrame(state.aoriFlag);
+    });
   }, state.aoriInterval);
 }
 
 function startAori() {
   state.aoriFlag = false;
-  drawPairFrame(false);
+  // Keep the bounded detail cache for a fast return to other modes, but stop
+  // its live surface while CSS-only aori switching is running.
+  if (typeof detailView !== 'undefined') detailView.cancel();
+  prepareAoriFrames();
   restartAoriTimer();
 }
 
 function stopAori() {
+  if(state.aoriFrame){cancelAnimationFrame(state.aoriFrame);state.aoriFrame=null;}
   if (state.aoriTimer) { clearInterval(state.aoriTimer); state.aoriTimer = null; }
+  aoriCanvas.style.display = 'none';
+  aoriCanvas.style.visibility = 'hidden';
+  clearAoriDetailSurface();
+  // The second full-resolution surface is needed only during playback.
+  if (aoriCanvas.width || aoriCanvas.height) aoriCanvas.width = aoriCanvas.height = 0;
 }
 
 // ─────────────────────────────────────────────────────────
@@ -3691,6 +3888,9 @@ async function renderDiffComposite(token, op, forceFit) {
 // Rendering uses the same LRU and in-flight deduplication as normal page navigation.
 function scheduleNextPageWarmup(token) {
   if (_prefetchTimer) clearTimeout(_prefetchTimer);
+  // Avoid speculative PDF work competing with viewport detail or evicting the visible page.
+  if(state.activeSubTab !== 'a' && state.activeSubTab !== 'b')return;
+  if(state.zoomFactor * DPR > computeVisualScale())return;
   _prefetchTimer = setTimeout(async () => {
     _prefetchTimer = null;
     if (token !== _renderToken || _activeViews || _prefetchRunning || state.scanStatus === 'running') return;
@@ -3705,8 +3905,11 @@ function scheduleNextPageWarmup(token) {
       for (const {side, idx} of jobs) {
         if (token !== _renderToken || _activeViews || state.scanStatus === 'running') return;
         const total = side === 'a' ? state.totalA : state.totalB;
-        if (idx >= total) continue;
+        if (idx < 0 || idx >= total) continue;
         const ann = ['highlight', 'absdiff'].includes(state.activeSubTab) ? false : side === 'a' ? state.showAnnA : state.showAnnB;
+        const currentIndex=side==='a'?state.pageA:state.pageB;
+        const currentEntry=cacheGet(side==='a'?cacheA:cacheB,`${currentIndex}|${scale}|${ann?1:0}`);
+        if(!currentEntry || currentEntry.img.data.byteLength*2 > MAX_CACHE_BYTES)continue;
         await getOrRender(side, idx, scale, ann);
       }
     } catch { /* speculative work must not interrupt navigation */ }
@@ -3716,6 +3919,8 @@ function scheduleNextPageWarmup(token) {
 
 function hasReadySinglePage() {
   const side = state.activeSubTab;
+  if (side === 'highlight' || side === 'absdiff')return !!comparisonCache.get(comparisonKey(side,computeVisualScale()));
+  if(side==='aori' || side==='split')return state.pair?.docA===state.docA && state.pair?.docB===state.docB && state.pair?.viewKey===JSON.stringify([state.pageA,state.pageB,computeVisualScale(),state.showAnnA,state.showAnnB,state.offsetDx,state.offsetDy,state.sensitivity]);
   if (side !== 'a' && side !== 'b') return false;
   const idx = side === 'a' ? state.pageA : state.pageB;
   const ann = side === 'a' ? state.showAnnA : state.showAnnB;
@@ -3725,6 +3930,8 @@ function hasReadySinglePage() {
 let _visiblePageLabel = null;
 let _foregroundView = null;
 async function renderCurrentView(forceFit = false) {
+  if(typeof detailView !== 'undefined') detailView.cancel();
+  stopAori();
   const token = ++_renderToken;
   const started = performance.now();
   _viewRequestedAt = started;
@@ -3744,6 +3951,7 @@ async function renderCurrentView(forceFit = false) {
     const displayed = await job;
     if (displayed && token === _renderToken) {
       _visiblePageLabel = requestedPageLabel();
+      if(state.pageA < 0 || state.pageB < 0) setStatus(state.pageA < 0 ? '追加ページ · A側は表示用の空白です。' : '削除ページ · B側は表示用の空白です。');
       updatePageInfo();
       recordTiming('pageDisplay', started);
       scheduleNextPageWarmup(token);
@@ -3755,6 +3963,7 @@ async function renderCurrentView(forceFit = false) {
   } finally {
     if (_foregroundView === job) _foregroundView = null;
     _activeViews--;
+    if(token === _renderToken && typeof detailView !== 'undefined')detailView.schedule();
     updateWorkflowUI();
   }
 }
@@ -3789,13 +3998,16 @@ async function renderCurrentViewNow(token, forceFit) {
 
   if (!state.docA || !state.docB) return showPlaceholder();
 
-  if (state.pageMap && bPageFor(state.pageA) !== state.pageB) {
-    setStatus('対応のないページです。AまたはBで紙面を確認してください。', 5000);
-    state.regions=null; updateRegionList(); return showPlaceholder();
-  }
   if (tab === 'highlight' || tab === 'absdiff') {
     closePair();
     return renderDiffComposite(token, tab === 'absdiff' ? 'absdiff' : 'highlight', forceFit);
+  }
+
+  const pairKey=JSON.stringify([state.pageA,state.pageB,visualScale,state.showAnnA,state.showAnnB,state.offsetDx,state.offsetDy,state.sensitivity]);
+  if(state.pair?.viewKey===pairKey && state.pair.docA===state.docA && state.pair.docB===state.docB){
+    if(tab==='aori')startAori();else compositeSplit();
+    if(forceFit)fitToView();
+    return true;
   }
 
   // ペアビットマップモード (あおり / スプリット)
@@ -3829,6 +4041,7 @@ async function renderCurrentViewNow(token, forceFit) {
   }
   closePair();
   state.pair = pair;
+  Object.assign(pair,{viewKey:pairKey,docA:state.docA,docB:state.docB});
   state.regions = { list: regionsRes.regions, rs: eaPlain.scale };
   state.diffPixels = regionsRes.count;
   state.regionIdx = -1;
@@ -3850,13 +4063,13 @@ function syncPageIndex() {
   if (diffPanel.classList.contains('visible')) rebuildDiffSummaryPanel();
 }
 function requestedPageLabel() {
-  const a = state.docA ? `A ${state.pageA + 1}` : 'A —';
-  const b = state.docB ? `B ${state.pageB + 1}` : 'B —';
+  const a = state.docA && state.pageA >= 0 ? `A ${state.pageA + 1}` : 'A —';
+  const b = state.docB && state.pageB >= 0 ? `B ${state.pageB + 1}` : 'B —';
   return state.activeSubTab === 'a' ? a : state.activeSubTab === 'b' ? b : `${a} / ${b}`;
 }
 function updatePageInfo() {
-  const a = state.docA ? `A ${state.pageA + 1}/${state.totalA}` : 'A —';
-  const b = state.docB ? `B ${state.pageB + 1}/${state.totalB}` : 'B —';
+  const a = state.docA && state.pageA >= 0 ? `A ${state.pageA + 1}/${state.totalA}` : 'A —';
+  const b = state.docB && state.pageB >= 0 ? `B ${state.pageB + 1}/${state.totalB}` : 'B —';
   pageInfo.textContent = `${a}  ${b}`;
   pageInfo.title = `${a}・${b}。クリックしてページ番号を入力`;
   pageInfo.setAttribute('aria-label', `${a}、${b}。ページ番号を入力`);
@@ -3866,6 +4079,10 @@ function updateNavButtons() {
   if(state.pageMap) {
     const rows=comparisonRows(), index=rows.findIndex(r=>r.id===currentComparisonPage());
     $('btn-prev').disabled=index<=0; $('btn-next').disabled=index>=rows.length-1;updatePageInfo();return;
+  }
+  if(state.docA && state.docB && state.pageBOffset===0) {
+    const index=currentComparisonPage();
+    $('btn-prev').disabled=index<=0;$('btn-next').disabled=index>=Math.max(state.totalA,state.totalB)-1;updatePageInfo();return;
   }
   $('btn-prev').disabled = state.pageA <= 0 && state.pageB <= 0;
   $('btn-next').disabled = (!state.docA || state.pageA >= state.totalA - 1) && (!state.docB || state.pageB >= state.totalB - 1);
@@ -3880,6 +4097,7 @@ function changePage(delta) {
     if(next) goToPage(next.id);
     return;
   }
+  if(state.docA && state.docB && state.pageBOffset===0) {goToPage(currentComparisonPage()+delta);return;}
   let changed = false;
   if (state.docA && state.pageA + delta >= 0 && state.pageA + delta < state.totalA) { state.pageA += delta; changed = true; }
   if (state.docB && state.pageB + delta >= 0 && state.pageB + delta < state.totalB) { state.pageB += delta; changed = true; }
@@ -3891,22 +4109,23 @@ function changePage(delta) {
   refreshTextPanel();
 }
 function goToPage(idx) {
-  if (state.pageMap && (idx >= state.totalA || bPageFor(idx) < 0)) {
-    if (idx >= state.totalA) { state.pageB = idx-state.totalA; switchSubTab('b'); }
-    else { state.pageA = idx; switchSubTab('a'); }
-    syncPageIndex(); renderCurrentView(); refreshTextPanel(); return;
+  if (state.pageMap) {
+    const row=comparisonRows().find(row=>row.id===idx);
+    if(!row)return;
+    state.pageA=row.a ?? -1;state.pageB=row.b ?? -1;
+  } else if(state.docA && state.docB && state.pageBOffset===0) {
+    if(idx<0 || idx>=Math.max(state.totalA,state.totalB))return;
+    state.pageA=idx<state.totalA?idx:-1;
+    state.pageB=idx<state.totalB?idx:-1;
+  } else {
+    let changed=false;
+    if(state.docA && idx>=0 && idx<state.totalA){state.pageA=idx;changed=true;}
+    const b=bPageFor(idx);
+    if(state.docB && b>=0 && b<state.totalB){state.pageB=b;changed=true;}
+    if(!changed)return;
   }
-  let changed = false;
-  if (state.docA && idx >= 0 && idx < state.totalA) { state.pageA = idx; changed = true; }
-  const bIdx = bPageFor(idx);
-  if (state.docB && bIdx >= 0 && bIdx < state.totalB) { state.pageB = bIdx; changed = true; }
-  if (changed) {
-    state.selectedAnnot = null;
-    clearOffsetPreview();
-    syncPageIndex();
-    renderCurrentView(false);
-    refreshTextPanel();
-  }
+  state.selectedAnnot=null;
+  clearOffsetPreview();syncPageIndex();renderCurrentView(false);refreshTextPanel();
 }
 
 // ─────────────────────────────────────────────────────────
@@ -4064,18 +4283,13 @@ function updateRegionList() {
 }
 
 function currentComparisonPage() {
-  if (state.pageMap && state.activeSubTab === 'b') {
-    const a = state.pageMap.indexOf(state.pageB);
-    return a < 0 ? state.totalA+state.pageB : a;
-  }
-  if (state.pageMap) return state.pageA;
-  // B側にだけ存在する末尾ページでも「次へ」が同じページで止まらない。
-  return state.pageBOffset === 0 && state.pageB >= state.totalA ? state.pageB : state.pageA;
+  if(state.pageMap) return state.pageA >= 0 ? state.pageA : state.totalA+state.pageB;
+  return state.pageA >= 0 ? state.pageA : state.pageB;
 }
 function updateComparisonNavigation() {
   const label = $('diff-position');
   if (!label) return;
-  const sorted = [...allDiffPages()].sort((a, b) => a - b);
+  const sorted = state.pageMap ? comparisonRows().map(r=>r.id).filter(id=>allDiffPages().has(id)) : [...allDiffPages()].sort((a, b) => a - b);
   const index = sorted.indexOf(currentComparisonPage());
   const ready = state.scanStatus === 'complete';
   label.textContent = !state.docA || !state.docB ? '差分 —'
@@ -4089,9 +4303,15 @@ function updateComparisonNavigation() {
 }
 
 function jumpToDiff(dir) {
-  const sorted = [...allDiffPages()].sort((a, b) => a - b);
+  const sorted = state.pageMap ? comparisonRows().map(r=>r.id).filter(id=>allDiffPages().has(id)) : [...allDiffPages()].sort((a, b) => a - b);
   if (!sorted.length) return;
   const cur = currentComparisonPage();
+  if(state.pageMap) {
+    const rows=comparisonRows(), position=rows.findIndex(r=>r.id===cur);
+    const ordered=dir==='next'?rows.slice(position+1).concat(rows.slice(0,position+1)):rows.slice(0,position).reverse().concat(rows.slice(position).reverse());
+    const target=ordered.find(r=>sorted.includes(r.id));
+    if(target)goToPage(target.id);rebuildDiffSummaryPanel();return;
+  }
   const target = dir === 'next'
     ? (sorted.find(p => p > cur) ?? sorted[0])
     : ([...sorted].reverse().find(p => p < cur) ?? sorted[sorted.length - 1]);
@@ -4140,6 +4360,7 @@ function exportCurrentView() {
   out.height = viewCanvas.height;
   const ctx = out.getContext('2d');
   ctx.drawImage(viewCanvas, 0, 0);
+  if (aoriCanvas.style.display !== 'none' && aoriCanvas.style.visibility !== 'hidden') ctx.drawImage(aoriCanvas, 0, 0);
   if (annotCanvas.style.display !== 'none') ctx.drawImage(annotCanvas, 0, 0);
   out.toBlob(blob => {
     out.width = 0; out.height = 0;
@@ -4203,15 +4424,16 @@ $('btn-next').addEventListener('click', () => changePage(1));
 
 pageInfo.addEventListener('click', () => {
   if (!state.docA && !state.docB) return;
-  const currentPage = state.docA ? state.pageA + 1 : state.pageB + 1;
-  const totalMax = Math.max(state.totalA || 0, state.totalB || 0);
+  const rows=state.pageMap?comparisonRows():null;
+  const currentPage = rows ? rows.findIndex(r=>r.id===currentComparisonPage())+1 : currentComparisonPage()+1;
+  const totalMax = rows ? rows.length : Math.max(state.totalA || 0, state.totalB || 0);
   const input = document.createElement('input');
   input.className = 'page-number-editor';
   input.type = 'number';
   input.min = 1;
   input.max = totalMax;
   input.value = currentPage;
-  input.setAttribute('aria-label', 'ページ番号');
+  input.setAttribute('aria-label', rows ? '比較位置（追加・削除を含む順番）' : 'ページ番号');
   input.style.cssText = [
     'width:80px', 'text-align:center', 'font-size:inherit',
     'font-family:inherit', 'background:var(--bg-panel)',
@@ -4224,7 +4446,7 @@ pageInfo.addEventListener('click', () => {
   const commit = () => {
     const v = parseInt(input.value, 10);
     input.replaceWith(pageInfo);
-    if (!isNaN(v) && v >= 1 && v <= totalMax) goToPage(v - 1);
+    if (!isNaN(v) && v >= 1 && v <= totalMax) goToPage(rows ? rows[v-1].id : v - 1);
     else updatePageInfo();
   };
   const cancel = () => { input.replaceWith(pageInfo); updatePageInfo(); };
@@ -4284,7 +4506,7 @@ if (qualitySelect) {
     state.lastDiffView = null;
     clearOffsetPreview();
     evictOtherScales(computeVisualScale());
-    setStatus(`画質: ${state.quality === 'high' ? '高 (3x)' : state.quality === 'light' ? '軽量 (2x)' : '標準 (2.5x)'}`, 3000);
+    setStatus(`画質: ${state.quality === 'high' ? '高' : state.quality === 'light' ? '軽量' : '標準'}`, 3000);
     renderCurrentView();
   });
 }
@@ -4530,7 +4752,7 @@ window.addEventListener('resize', () => {
 // テスト/拡張用フック
 window.__SABUN__ = {
   state, annots, buildXFDF, renderCurrentView, loadPDF,
-  performanceStats, startDiffScan, toggleScanPause,
+  performanceStats, resourceStats, startDiffScan, toggleScanPause,
   autoAnnotateRegions, saveAnnotatedPDF, toggleTextPanel, buildNativeAnnotatedPdf,
   generateReport, generatePdfReport, autoAlignOffset, togglePageLink, toggleAnnotListPanel,
 };
@@ -4634,6 +4856,7 @@ $('btn-open-missing').addEventListener('click', () => $(state.docA ? 'file-input
 $('btn-start-a').addEventListener('click', () => $('file-input-a').click());
 $('btn-start-b').addEventListener('click', () => $('file-input-b').click());
 $('btn-scan-pause').addEventListener('click', toggleScanPause);
+$('btn-scan-overlay-pause').addEventListener('click', toggleScanPause);
 updateWorkflowUI();
 
 $('btn-save-timings').addEventListener('click', () => {
@@ -4728,6 +4951,7 @@ async function showPairPreview(index) {
   }
 }
 function buildPagePairEditor() {
+  cancelPairSuggestion();
   clearPairPreview();
   const body = $('page-pair-rows'); body.replaceChildren();
   for(let a=0;a<state.totalA;a++) {
@@ -4738,18 +4962,18 @@ function buildPagePairEditor() {
     const b=bPageFor(a);input.value=b>=0 && b<state.totalB ? b+1 : '';input.placeholder='削除';
     input.setAttribute('aria-label',`A ${a+1} に対応するBのページ。空欄は削除`);
     input.addEventListener('focus',()=>{if(pairEditorSelection!==a)showPairPreview(a);});
-    input.addEventListener('change',()=>{showPairPreview(a);$('page-pair-note').textContent='編集中 · 適用するまで比較は変わりません。';});
+    input.addEventListener('change',()=>{resolvePairReview(input);showPairPreview(a);$('page-pair-note').textContent='編集中 · 適用するまで比較は変わりません。';});
     row.append(title,document.createTextNode('→ B'),input);body.append(row);
   }
   if(state.totalA) showPairPreview(Math.min(pairEditorSelection,state.totalA-1));
 }
-$('page-pair-settings').addEventListener('toggle',()=>{if($('page-pair-settings').open)buildPagePairEditor();else clearPairPreview();});
+$('page-pair-settings').addEventListener('toggle',()=>{if($('page-pair-settings').open)buildPagePairEditor();else {cancelPairSuggestion();clearPairPreview();}});
 for (const [id,delta] of [['page-pair-minus',-1],['page-pair-plus',1]]) {
   $(id).addEventListener('click',()=>{
     const inputs=[...$('page-pair-rows').querySelectorAll('input')];
     const shifted=shiftedPageValues(inputs.map(input=>input.value),pairEditorSelection,delta,state.totalB);
     if(!shifted) {$('page-pair-note').textContent='範囲外になるため変更していません。対応しない行を空欄にしてから調整してください。';return;}
-    inputs.forEach((input,i)=>input.value=shifted[i]);
+    inputs.forEach((input,i)=>{if(input.value!==shifted[i]) {input.value=shifted[i];resolvePairReview(input);}});
     showPairPreview(pairEditorSelection);
     $('page-pair-note').textContent=`A ${pairEditorSelection+1}以降を${delta>0?'+1':'−1'} · 未適用（空欄は維持）`;
   });
@@ -4761,6 +4985,7 @@ function applyPageMap(map) {
 }
 $('page-pair-apply').addEventListener('click',()=>{
   const inputs=[...$('page-pair-rows').querySelectorAll('input')];
+  if(inputs.some(input=>input.dataset.review==='true')) {$('page-pair-note').textContent='要確認の行はB番号を指定するか、削除で確定してください。';return;}
   const map=inputs.map(input=>input.value===''?null:Number(input.value)-1);
   const assigned=map.filter(b=>b!==null);
   if(!state.docA || !state.docB || map.length!==state.totalA || assigned.some(b=>!Number.isInteger(b)||b<0||b>=state.totalB) || new Set(assigned).size!==assigned.length) {
@@ -4770,6 +4995,95 @@ $('page-pair-apply').addEventListener('click',()=>{
   $('page-pair-note').textContent=`適用済み · 対応 ${assigned.length} / 削除 ${map.length-assigned.length} / 追加 ${state.totalB-assigned.length}`;
 });
 $('page-pair-reset').addEventListener('click',()=>{applyPageMap(null);buildPagePairEditor();$('page-pair-note').textContent='同じ番号同士の対応に戻しました。';});
+
+
+let pairSuggestionVersion = 0;
+let pairSuggestionRunning = false;
+function cancelPairSuggestion() {
+  ++pairSuggestionVersion;
+  pairSuggestionRunning=false;
+  $('page-pair-suggest').textContent='対応を自動提案';
+  for(const el of $('page-pair-rows').querySelectorAll('input, button')) el.disabled=false;
+  for(const id of ['page-pair-apply','page-pair-reset','page-pair-minus','page-pair-plus']) $(id).disabled=false;
+}
+function resolvePairReview(input) {
+  delete input.dataset.review;
+  input.closest('.page-pair-row').querySelector('.pair-review')?.remove();
+}
+async function readPairFeature(doc, index, check) {
+  await check();
+  const page=await doc.getPage(index+1);
+  const base=page.getViewport({scale:1});
+  const viewport=page.getViewport({scale:160/Math.max(base.width,base.height)});
+  const canvas=document.createElement('canvas');
+  const small=document.createElement('canvas');
+  canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+  small.width=32;small.height=32;
+  try {
+    const ctx=canvas.getContext('2d',{alpha:false});
+    ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);
+    await pdfWorkGate.run(()=>page.render({canvasContext:ctx,viewport,annotationMode:pdfjsLib.AnnotationMode.DISABLE}).promise);
+    await check();
+    let text='';
+    try {text=(await pdfWorkGate.run(()=>page.getTextContent())).items.map(item=>item.str || '').join(' ');} catch { /* image features remain available */ }
+    await check();
+    const sc=small.getContext('2d',{willReadFrequently:true});
+    sc.drawImage(canvas,0,0,32,32);
+    return pageFeature(text,sc.getImageData(0,0,32,32).data,base.width/base.height);
+  } finally {canvas.width=canvas.height=small.width=small.height=0;try{page.cleanup();}catch{}}
+}
+async function runPairSuggestion() {
+  if(pairSuggestionRunning) {cancelPairSuggestion();$('page-pair-note').textContent='自動提案を中止しました。編集内容は変更していません。';return;}
+  if(!state.docA || !state.docB) {$('page-pair-note').textContent='AとBのPDFを読み込んでください。';return;}
+  if(_loadingSides.size) {$('page-pair-note').textContent='PDFの読み込みが終わってから自動提案してください。';return;}
+  const loadA=loadVersions.a, loadB=loadVersions.b;
+  const version=++pairSuggestionVersion, docA=state.docA, docB=state.docB;
+  const inputs=[...$('page-pair-rows').querySelectorAll('input')];
+  pairSuggestionRunning=true;
+  $('page-pair-suggest').textContent='提案を中止';
+  for(const el of $('page-pair-rows').querySelectorAll('input, button')) el.disabled=true;
+  for(const id of ['page-pair-apply','page-pair-reset','page-pair-minus','page-pair-plus']) $(id).disabled=true;
+  const current=()=>version===pairSuggestionVersion && loadA===loadVersions.a && loadB===loadVersions.b && docA===state.docA && docB===state.docB && $('page-pair-settings').open;
+  const check=async()=>{
+    await new Promise(resolve=>setTimeout(resolve,0));
+    if(!current()) throw new Error('cancelled');
+    while(_activeViews) {await new Promise(resolve=>setTimeout(resolve,50));if(!current())throw new Error('cancelled');}
+  };
+  try {
+    const features=[];let done=0, failures=0;
+    for(const doc of [docA,docB]) {
+      const list=[];features.push(list);
+      for(let i=0;i<doc.numPages;i++) {
+        await check();
+        $('page-pair-note').textContent=`ページを確認中 ${++done} / ${docA.numPages+docB.numPages}`;
+        try {
+          list.push(await (_thumbChain=_thumbChain.catch(()=>{}).then(()=>readPairFeature(doc,i,check))));
+        } catch(error) {if(!current())throw error;list.push(null);failures++;}
+      }
+    }
+    if(failures) {$('page-pair-note').textContent=`${failures}ページの画像を読み込めず、自動提案を完了できませんでした。編集内容は変更していません。`;return;}
+    $('page-pair-note').textContent='対応候補を照合中…';
+    const result=await suggestPageMap(...features,check);
+    await check();
+    result.forEach((item,i)=>{
+      const input=inputs[i];resolvePairReview(input);input.value=item.page===null?'':String(item.page+1);
+      if(item.review) {
+        input.dataset.review='true';
+        const review=document.createElement('button');review.type='button';review.className='pair-review';
+        review.textContent='要確認 · 削除で確定';
+        review.title='対応先がある場合はB番号を入力。対応先がない場合だけ、このボタンで削除を確定します。';
+        review.addEventListener('click',()=>{resolvePairReview(input);$('page-pair-note').textContent='削除として確認済み · 未適用';});
+        input.closest('.page-pair-row').append(review);
+      }
+    });
+    const count=result.filter(item=>!item.review).length;
+    $('page-pair-note').textContent=`未適用 · 候補 ${count} / 要確認 ${result.length-count}${failures?` / 読込失敗 ${failures}`:''}。空欄は対応未確定です。未使用のBは適用後に追加になります。紙面を確認して「適用して比較」を押してください。`;
+    showPairPreview(pairEditorSelection);
+  } catch(error) {
+    if(current()) $('page-pair-note').textContent='自動提案に失敗しました。編集内容は変更していません。';
+  } finally {if(version===pairSuggestionVersion)cancelPairSuggestion();}
+}
+$('page-pair-suggest').addEventListener('click',runPairSuggestion);
 
 function updateAnnotQuickEdit() {
   const box=$('annot-quick-edit');if(!box)return;
@@ -4813,5 +5127,115 @@ const fitResizeObserver=new ResizeObserver(()=>{
   const fitted=Math.abs(state.zoomFactor-previous.zoom)<.001 && Math.abs(state.panX-previous.x)<2 && Math.abs(state.panY-previous.y)<2;
   lastFitSize=next;
   if(fitted && viewCanvas.style.display!=='none')fitToView();
+  else if(typeof detailView !== 'undefined'){
+    if(state.activeSubTab==='aori')clearAoriDetailSurface();
+    detailView.schedule();
+  }
 });
 for(const element of [viewContainer,$('diff-summary-panel'),$('text-view'),$('annot-list-panel')])if(element)fitResizeObserver.observe(element);
+
+// Independent visual detail layer: never used by scanning or exports.
+var detailView = new DetailView({
+  canvas:$('detail-canvas'),
+  delay:750,
+  maxCacheBytes:8*1024*1024,
+  getRequest() {
+    const mode=state.activeSubTab, single=mode==='a'||mode==='b';
+
+    if(!single && (!state.docA || !state.docB))return null;
+    if(['highlight','absdiff'].includes(mode) && !state.lastDiffView)return null;
+    if(document.hidden || state.scanStatus==='running' || state.scanStatus==='paused' || _prefetchRunning || _activeViews || _loadingSides.size || viewCanvas.style.display==='none')return null;
+    if(single && (!(mode==='a'?state.docA:state.docB) || (mode==='a'?state.pageA:state.pageB)<0))return null;
+    const baseScale=state.renderScale || DPR;
+    // Aori retains two detail surfaces for CSS-only switching. Keep their
+    // combined budget close to a single ordinary detail surface.
+    const maxPixels=mode==='aori'?393216:524288;
+    const rect=detailRect({width:viewCanvas.width/baseScale,height:viewCanvas.height/baseScale,
+      panX:state.panX,panY:state.panY,zoom:state.zoomFactor,
+      viewWidth:viewContainer.clientWidth,viewHeight:viewContainer.clientHeight,baseScale,dpr:DPR,maxPixels,maxScale:state.quality==='high'?6:state.quality==='std'?4:computeVisualScale()});
+    if(!rect)return null;
+    return {...rect,mode,single,baseScale,docA:state.docA,docB:state.docB,pageA:state.pageA,pageB:state.pageB,
+      showAnnA:state.showAnnA,showAnnB:state.showAnnB,
+      reference:['highlight','absdiff'].includes(mode)?state.lastDiffView?.img:null,
+      dx:state.pageA<0||state.pageB<0?0:Math.round(state.offsetDx*baseScale)/baseScale,
+      dy:state.pageA<0||state.pageB<0?0:Math.round(state.offsetDy*baseScale)/baseScale,
+      key:JSON.stringify([state.pageA,state.pageB,['aori','split'].includes(mode)?'pair':mode,baseScale,rect,state.panX,state.panY,state.showAnnA,state.showAnnB,state.offsetDx,state.offsetDy,state.sensitivity,state.emphasize]),
+      left:Math.round(state.panX)+rect.x*state.zoomFactor,top:Math.round(state.panY)+rect.y*state.zoomFactor,
+      cssWidth:rect.pixelWidth/rect.scale*state.zoomFactor,cssHeight:rect.pixelHeight/rect.scale*state.zoomFactor};
+  },
+  render(request) {
+    let cancelled=false,task=null;
+    const surfaces=[];
+    const dispose=()=>{for(const canvas of surfaces)canvas.width=canvas.height=0;};
+    const renderSide=async(side)=>{
+      const canvas=document.createElement('canvas');surfaces.push(canvas);
+      canvas.width=request.pixelWidth;canvas.height=request.pixelHeight;
+      const ctx=canvas.getContext('2d',{alpha:false});
+      ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);
+      const index=side==='a'?request.pageA:request.pageB;
+      if(index<0)return canvas;
+      const doc=side==='a'?request.docA:request.docB;
+      let page;
+      try{
+        page=await doc.getPage(index+1);if(cancelled)throw Error('cancelled');
+        const annotations=(request.single || ['aori','split'].includes(request.mode)) && (side==='a'?request.showAnnA:request.showAnnB);
+        task=page.render({canvasContext:ctx,viewport:page.getViewport({scale:request.scale}),
+          transform:[1,0,0,1,(-request.x+(side==='b'&&!request.single?request.dx:0))*request.scale,(-request.y+(side==='b'&&!request.single?request.dy:0))*request.scale],
+          annotationMode:annotations?pdfjsLib.AnnotationMode.ENABLE:pdfjsLib.AnnotationMode.DISABLE,intent:'print'});
+        await task.promise;if(cancelled)throw Error('cancelled');return canvas;
+      }finally{try{page?.cleanup();}catch{}}
+    };
+    const promise=pdfWorkGate.run(async()=>{
+      try{
+        if(request.single)return await renderSide(request.mode);
+        const a=await renderSide('a');
+        const b=request.mode==='highlight'?null:await renderSide('b');
+        const width=request.pixelWidth,height=request.pixelHeight;
+        let difference=null;
+        if(['highlight','absdiff'].includes(request.mode)){
+          const ad=a.getContext('2d').getImageData(0,0,width,height).data;
+          const bd=b?.getContext('2d').getImageData(0,0,width,height).data;
+          difference=new ImageData(await refineComparison(request,ad,bd,()=>cancelled),width,height);
+          dispose();
+          request.reference=null;
+        }
+        return {width,height,bytes:width*height*4*(difference?1:2),dispose(){difference=null;dispose();},paint(ctx){
+          if(difference)ctx.putImageData(difference,0,0);
+          else if(state.activeSubTab==='aori'){
+            ctx.clearRect(0,0,width,height);ctx.drawImage(a,0,0);
+            if(aoriDetailCanvas.width!==width)aoriDetailCanvas.width=width;
+            if(aoriDetailCanvas.height!==height)aoriDetailCanvas.height=height;
+            const bctx=aoriDetailCanvas.getContext('2d');bctx.clearRect(0,0,width,height);bctx.drawImage(b,0,0);
+            const decorate=(target,label)=>{
+              target.save();
+              const f=request.scale/request.baseScale;
+              target.setTransform(f,0,0,f,-request.x*request.scale,-request.y*request.scale);
+              if(state.showRegions && state.regions?.list.length)drawRegionOverlay(target);
+              target.restore();drawCornerLabel(target,label);
+            };
+            decorate(ctx,'A');decorate(bctx,'B');
+            Object.assign(aoriDetailCanvas.style,{display:'block',visibility:state.aoriFlag?'visible':'hidden',left:`${request.left}px`,top:`${request.top}px`,width:`${request.cssWidth}px`,height:`${request.cssHeight}px`});
+            return;
+          }
+          else {
+            ctx.drawImage(a,0,0);
+            const sx=Math.max(0,Math.min(width,(state.pair.w/state.pair.rs*state.splitPos-request.x)*request.scale));
+            if(sx<width)ctx.drawImage(b,sx,0,width-sx,height,sx,0,width-sx,height);
+          }
+          ctx.save();
+          const f=request.scale/request.baseScale;
+          ctx.setTransform(f,0,0,f,-request.x*request.scale,-request.y*request.scale);
+          if(state.showRegions && state.regions?.list.length)drawRegionOverlay(ctx);
+          ctx.restore();
+          if(state.activeSubTab==='split'){
+            const sx=(state.pair.w/state.pair.rs*state.splitPos-request.x)*request.scale;
+            ctx.fillStyle='#3b82f6';ctx.fillRect(sx-1,0,2,height);
+            drawCornerLabel(ctx,'A','left');drawCornerLabel(ctx,'B','right');
+          }
+        }};
+      }catch(error){dispose();throw error;}
+    });
+    return {promise,cancel(){cancelled=true;task?.cancel();}};
+  }
+});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){detailView.cancel();clearAoriDetailSurface();}else detailView.schedule();});
