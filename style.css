@@ -440,6 +440,11 @@ body {
   will-change: transform;
 }
 
+#aori-canvas {
+  pointer-events: none;
+  z-index: 5;
+}
+
 .marquee-box {
   position: absolute;
   border: 1px dashed var(--accent);
@@ -1011,6 +1016,48 @@ kbd {
   width: 14px;
   height: 14px;
   border-width: 2px;
+}
+
+#scan-overlay[hidden] { display: none; }
+
+#scan-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 55;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg-diff) 46%, transparent);
+  backdrop-filter: blur(2px) saturate(0.8);
+  -webkit-backdrop-filter: blur(2px) saturate(0.8);
+}
+
+.scan-overlay-card {
+  width: min(390px, calc(100% - 24px));
+  padding: 18px 20px 15px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
+  box-shadow: 0 14px 42px rgba(0, 0, 0, 0.26);
+  color: var(--text-primary);
+}
+
+.scan-overlay-heading { display: flex; align-items: center; gap: 13px; }
+.scan-overlay-heading .spinner {
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  animation-duration: 1.6s;
+}
+.scan-overlay-heading strong { display: block; font-size: 14px; }
+.scan-overlay-heading span { display: block; margin-top: 4px; color: var(--text-secondary); font-size: 12px; }
+#scan-overlay-meter { width: 100%; height: 7px; margin: 17px 0 8px; accent-color: var(--accent); }
+.scan-overlay-footer { display: flex; justify-content: space-between; align-items: center; }
+#scan-overlay-percent { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.scan-overlay-card p { margin: 12px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-overlay-heading .spinner { animation: none; }
 }
 
 /* ---------- Text diff view ---------- */
@@ -2574,3 +2621,8 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
 .thumb-page-num .diff-dot { flex-shrink:0; margin:0; }
 .thumb-number { flex-shrink:0; }
 .diff-page-label { white-space:nowrap; }
+
+.page-pair-row .pair-review { grid-column:1 / -1; font-size:11px; color:var(--text-secondary); }
+
+#detail-canvas { position:absolute; pointer-events:none; z-index:10; }
+#aori-detail-canvas { position:absolute; pointer-events:none; z-index:11; }
