@@ -255,6 +255,9 @@
           <div id="view-row">
             <div class="view-container" id="view-container">
               <canvas id="view-canvas" class="view-canvas" style="display:none;" aria-label="比較ビュー"></canvas>
+              <canvas id="aori-canvas" class="view-canvas" style="display:none;" aria-hidden="true"></canvas>
+              <canvas id="detail-canvas" aria-hidden="true" style="display:none;"></canvas>
+              <canvas id="aori-detail-canvas" aria-hidden="true" style="display:none;"></canvas>
               <canvas id="annot-canvas" class="view-canvas annot-canvas" style="display:none;" aria-hidden="true"></canvas>
               <div id="marquee-box" class="marquee-box" aria-hidden="true"></div>
               <div id="locate-marker" aria-hidden="true"></div>
@@ -269,6 +272,17 @@
                 <p style="font-size:11px;opacity:0.5;">対応: ドラッグ＆ドロップ / ファイル選択</p>
               </div>
               <div id="busy-indicator" role="status" aria-label="計算中"><div class="spinner"></div><span>計算中…</span></div>
+              <div id="scan-overlay" role="dialog" aria-labelledby="scan-overlay-title" hidden>
+                <div class="scan-overlay-card">
+                  <div class="scan-overlay-heading"><div class="spinner" aria-hidden="true"></div><div>
+                    <strong id="scan-overlay-title">全ページを比較しています</strong>
+                    <span id="scan-overlay-detail">比較用PDFを準備しています</span>
+                  </div></div>
+                  <progress id="scan-overlay-meter" max="100" value="0" aria-label="全ページ比較の進捗"></progress>
+                  <div class="scan-overlay-footer"><span id="scan-overlay-percent">0%</span><button id="btn-scan-overlay-pause" class="tbtn">一時停止</button></div>
+                  <p>比較が終わると差分ページへ移動できます。PDFの変更や設定操作は上部から行えます。</p>
+                </div>
+              </div>
               <div id="scan-progress" aria-hidden="true"></div>
 
               <div id="annot-quick-edit" role="toolbar" aria-label="選択注釈の編集" hidden>
@@ -344,6 +358,7 @@
               </div>
               <details class="page-pair-settings" id="page-pair-settings"><summary>ページ対応 <span>編集</span></summary>
                 <p>AごとにBのページを指定。空欄は削除、使われていないBは追加として扱います。</p>
+                <button id="page-pair-suggest" type="button">対応を自動提案</button>
                 <div id="page-pair-preview" aria-label="選択した対応ページの紙面"></div>
                 <div class="pair-shift-controls"><span id="page-pair-selection">行を選択</span><button id="page-pair-minus" title="選択行以降のB番号を1減らす">−1</button><button id="page-pair-plus" title="選択行以降のB番号を1増やす">＋1</button></div>
                 <div id="page-pair-rows"></div>
