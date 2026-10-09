@@ -92,23 +92,12 @@
       <div class="toolbar-sep"></div>
 
       <!-- スタイル (新規作成と選択中の注釈に適用) -->
-      <label class="annot-style-label" title="線の色">線
-        <input type="color" id="annot-stroke" value="#ff2d2d" aria-label="線の色">
-      </label>
-      <div class="annot-palette" role="group" aria-label="線の色パレット">
-        <button type="button" class="annot-swatch active" data-annot-color="#ff2d2d" style="--swatch:#ff2d2d" title="赤 (R255 G45 B45)" aria-label="赤"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#ff8a00" style="--swatch:#ff8a00" title="橙" aria-label="橙"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#ffd400" style="--swatch:#ffd400" title="黄" aria-label="黄"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#00a651" style="--swatch:#00a651" title="緑" aria-label="緑"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#00a2e8" style="--swatch:#00a2e8" title="水色" aria-label="水色"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#0000ff" style="--swatch:#0000ff" title="青 (R0 G0 B255)" aria-label="青"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#7030a0" style="--swatch:#7030a0" title="紫" aria-label="紫"></button>
-        <button type="button" class="annot-swatch" data-annot-color="#000000" style="--swatch:#000000" title="黒" aria-label="黒"></button>
-      </div>
-      <label class="annot-style-label" title="塗りつぶしの有無と色">
-        <input type="checkbox" id="annot-fill-enable" aria-label="塗りを有効化"> 塗り
-        <input type="color" id="annot-fill" value="#ffe14d" disabled aria-label="塗りの色">
-      </label>
+      <button type="button" class="toolbar-btn annot-color-btn" id="btn-annot-stroke-color" data-color-target="stroke" aria-haspopup="dialog" aria-expanded="false" title="線のカラーと不透明度">
+        <span class="annot-style-chip" id="annot-stroke-chip"></span>線
+      </button>
+      <button type="button" class="toolbar-btn annot-color-btn" id="btn-annot-fill-color" data-color-target="fill" aria-haspopup="dialog" aria-expanded="false" title="塗りのカラーと不透明度">
+        <span class="annot-style-chip" id="annot-fill-chip"></span>塗り
+      </button>
       <label class="annot-style-label" title="線幅 (pt)">線幅
         <select id="annot-width" aria-label="線幅">
           <option value="0.5">0.5pt</option>
@@ -286,7 +275,7 @@
               <div id="scan-progress" aria-hidden="true"></div>
 
               <div id="annot-quick-edit" role="toolbar" aria-label="選択注釈の編集" hidden>
-                <span id="annot-quick-count"></span><input id="annot-quick-color" type="color" aria-label="選択注釈の線色">
+                <span id="annot-quick-count"></span><button type="button" class="annot-color-btn" id="annot-quick-color" data-color-target="stroke" aria-haspopup="dialog" aria-expanded="false" title="線のカラーと不透明度" aria-label="選択注釈の線のカラーと不透明度"><span class="annot-style-chip" id="annot-quick-chip"></span></button>
                 <input id="annot-quick-width" type="number" min="0.5" max="20" step="0.5" aria-label="選択注釈の線幅">
                 <textarea id="annot-quick-text" aria-label="選択注釈の文字" rows="2" hidden></textarea>
                 <button id="annot-quick-copy" title="複製 (Ctrl/Cmd+D)">複製</button><button id="annot-quick-delete">削除</button>
@@ -421,6 +410,25 @@
   </div>
 
   <!-- DROP OVERLAY -->
+  <!-- 注釈のカラー・不透明度 (線/塗り共用のポップオーバー) -->
+  <div id="annot-color-popover" role="dialog" aria-labelledby="annot-color-title" hidden>
+    <div class="acp-title" id="annot-color-title">線のカラー</div>
+    <button type="button" class="acp-none" id="acp-none" aria-pressed="false">塗りなし</button>
+    <div class="acp-grid" id="acp-grid" role="group" aria-label="カラーパレット"></div>
+    <div class="acp-custom">
+      <button type="button" id="acp-more" title="パレットにない色をカラーピッカーで指定">その他の色…</button>
+      <input type="color" id="acp-picker" value="#ff2d2d" tabindex="-1" aria-hidden="true">
+      <input type="text" id="acp-hex" maxlength="7" spellcheck="false" autocomplete="off" aria-label="カラーコード (#RRGGBB)" placeholder="#RRGGBB">
+    </div>
+    <div class="acp-opacity">
+      <label for="acp-opacity-range">不透明度</label>
+      <div class="acp-opacity-row">
+        <input type="range" id="acp-opacity-range" min="0" max="100" step="1" value="100">
+        <input type="number" id="acp-opacity-number" min="0" max="100" step="1" value="100" aria-label="不透明度 (%)"><span>%</span>
+      </div>
+    </div>
+  </div>
+
   <div id="drop-overlay" aria-hidden="true">PDFをドロップ<br><small style="font-size:14px;opacity:0.8;">左のA/Bサムネイル欄にドロップすると読み込み先を指定できます</small></div>
 
   <!-- HELP MODAL -->
@@ -472,9 +480,9 @@
           <li>ツール: 選択<kbd>V</kbd> / 矩形<kbd>R</kbd> / 楕円<kbd>O</kbd> / 線<kbd>L</kbd> / 矢印<kbd>A</kbd>（注釈バー表示中のみ・<strong>同じキーをもう一度押すと解除</strong>）。描画後は自動で選択ツールに戻ります（「維持」ONで連続描画）</li>
           <li><strong>複製</strong> — 選択中の注釈を <kbd>Ctrl/Cmd+C</kbd> → <kbd>Ctrl/Cmd+V</kbd> でコピペ、または <kbd>Option/Alt</kbd>+ドラッグでその場複製</li>
           <li><strong>サイズ変更</strong> — 選択中の注釈は四隅（線・矢印は両端点）のハンドルをドラッグ。テキストは高さに合わせて文字サイズも変わります。矢印キーで1pt移動（<kbd>Shift</kbd>で10pt）</li>
-          <li><strong>スタイル</strong> — 線色 / 塗り(なし・色) / 線幅(0.5〜5pt) / 線種(実線・破線・点線)。選択中の注釈にも即適用</li>
+          <li><strong>スタイル</strong> — 「線」「塗り」ボタンでAcrobat準拠のカラーパレットを開きます。「その他の色…」・カラーコード(#RRGGBB)で任意の色も指定でき、直近2色はパレットの空き枠に残ります。「線なし」「塗りなし」も選べます（線なしは塗りのある矩形・楕円のみ。両方なしは不可）。不透明度はスライダーまたは数値(0〜100%)で指定。ほかに線幅(0.5〜5pt) / 線種(実線・破線・点線)。選択中の注釈にも即適用</li>
           <li><strong>注釈中の画面操作</strong> — ツール選択中も <kbd>Space</kbd>ドラッグ / マウス中ボタン / ホイール / <kbd>Ctrl+ホイール</kbd> でパン・ズームできます</li>
-          <li><strong>差分領域を注釈化</strong> — 検出された差分領域の枠サイズで矩形注釈を一括付与（初期値: 塗りなし・赤線・1pt実線）</li>
+          <li><strong>差分領域を注釈化</strong> — 検出された差分領域の枠サイズで矩形注釈を一括付与（初期値: 塗りなし・赤線・1pt実線・不透明度100%）</li>
           <li><strong>注釈入りPDF保存</strong> — Acrobatの<strong>長方形・楕円・線・矢印・テキストコメント</strong>として実PDFに埋め込み。Acrobatでそのまま選択・編集・削除できます</li>
           <li><strong>XFDF書き出し</strong> — Acrobatの「コメント &gt; 読み込み」で元PDFに注釈として取り込む場合に使用</li>
           <li><strong>注釈一覧</strong> — 注釈バーの「一覧」で全ページの注釈をパネル表示。クリックでジャンプ、✕で個別削除</li>
