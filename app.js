@@ -50,10 +50,17 @@ const MAX_NORM_TEXT_CACHE_ENTRIES = 48;
 // ※ 相対パスは pdf.js worker 基準で解決されるため、ページ基準の絶対URLにする
 // ※ useSystemFonts: true — 非埋め込みフォント(特に日本語)をOSのフォントで描画。
 //   false だと CJK グリフを持たない代替フォントに落ちて文字が表示されない。
+// ※ wasmUrl: JPEG2000 / JBIG2 画像の復号器の場所 (PDF.js 5 以降)。
+//   未指定だと JPEG2000 画像が白紙で描画され、ワーカー側の cMap 取得も無効になる。
+// ※ useWasm: false — 復号器は同梱の JS 版を使う。true にすると ICC カラー管理 (qcms) も
+//   有効になり、CMYK の色差が縮んで従来の感度しきい値では色変更を見逃すことがある。
+//   iccUrl も同じ理由で指定しない (DeviceCMYK は従来どおりの簡易変換)。
 const PDF_LOAD_OPTS = {
   cMapUrl: new URL('lib/cmaps/', document.baseURI).href,
   cMapPacked: true,
   standardFontDataUrl: new URL('lib/standard_fonts/', document.baseURI).href,
+  wasmUrl: new URL('lib/wasm/', document.baseURI).href,
+  useWasm: false,
   useSystemFonts: true,
   isEvalSupported: false,
   verbosity: 0,
@@ -135,8 +142,10 @@ const state = {
 
   // 注釈 (Acrobat風スタイル設定 — 新規作成と自動注釈化の既定値)
   annotTool: null, // null|'select'|'rect'|'ellipse'|'line'|'arrow'|'text'
-  annotStroke: '#ff2d2d',   // 線色
+  annotStroke: '#db3425',   // 線色 (パレットの赤)
+  annotNoStroke: false,     // 線なし (矩形・楕円のみ。線色 annotStroke は保持)
   annotFill: null,          // 塗り色 (null = 塗りなし)
+  annotOpacity: 1,          // 不透明度 0〜1 (PDFの /CA。線・塗り・文字に共通)
   annotWidth: 1,            // 線幅 (pt)
   annotDash: 'solid',       // 'solid'|'dashed'|'dotted'
   annotTarget: 'b',         // 注釈対象 'a'|'b'|'both'
@@ -169,7 +178,7 @@ function selectedAnnots() {
   return [...annotSelection].filter(s=>visible.has(s));
 }
 function rememberAnnots() {
-  if(restoringAnnots || state.annotDrag || state.annotResize || state.annotDraft) return;
+  if(restoringAnnots || state.annotDrag || state.annotResize || state.annotDraft || state.annotStyleScrub) return;
   const value=JSON.stringify({a:[...annots.a],b:[...annots.b]});
   if(value===annotHistory[annotHistoryIndex])return;
   annotHistory=annotHistory.slice(0,annotHistoryIndex+1);annotHistory.push(value);
@@ -250,9 +259,6 @@ const diffPixelLabel = $('diff-pixel-label');
 
 const annotBar = $('annot-bar');
 const btnAnnot = $('btn-annot');
-const annotStrokeInput = $('annot-stroke');
-const annotFillEnable = $('annot-fill-enable');
-const annotFillInput = $('annot-fill');
 const annotWidthSelect = $('annot-width');
 const annotDashSelect = $('annot-dash');
 const annotTargetSelect = $('annot-target');
@@ -1262,6 +1268,20 @@ function dashPattern(dash, lwPx) {
   return [];
 }
 
+// 不透明度 (0〜1)。未設定の注釈 (旧データ) は不透明。
+function annotOpacityOf(s) {
+  const v = Number(s.opacity ?? 1);
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
+}
+
+// 線色。stroke===null は「線なし」(矩形・楕円のみ)。線・矢印・テキストは線色が本体なので
+// 常に色を返す。stroke 未設定の旧データは従来どおり赤。
+function annotStrokeOf(s) {
+  if (s.stroke === null && s.type !== 'line' && s.type !== 'arrow' && s.type !== 'text') return null;
+  return s.stroke || s.color || '#ff2d2d';
+}
+function isStrokeOptional(s) { return s.type === 'rect' || s.type === 'ellipse'; }
+
 function drawShape(ctx, s, t, selected) {
   const p1 = pdfToImageT(t, s.x1, s.y1);
   const p2 = pdfToImageT(t, s.x2, s.y2);
@@ -1270,9 +1290,10 @@ function drawShape(ctx, s, t, selected) {
   const w = Math.abs(p2.ix - p1.ix);
   const h = Math.abs(p2.iy - p1.iy);
   const rs = t.rs;
-  const stroke = s.stroke || s.color || '#ff2d2d';
+  const stroke = annotStrokeOf(s);
   const lwPx = Math.max(0.75, (s.thickness ?? 1) * rs);
   ctx.save();
+  ctx.globalAlpha = annotOpacityOf(s);
   ctx.strokeStyle = stroke;
   ctx.lineWidth = lwPx;
   ctx.lineJoin = 'round';
@@ -1281,12 +1302,12 @@ function drawShape(ctx, s, t, selected) {
 
   if (s.type === 'rect') {
     if (s.fill) { ctx.fillStyle = s.fill; ctx.fillRect(x, y, w, h); }
-    ctx.strokeRect(x, y, w, h);
+    if (stroke) ctx.strokeRect(x, y, w, h);
   } else if (s.type === 'ellipse') {
     ctx.beginPath();
     ctx.ellipse(x + w / 2, y + h / 2, Math.max(1, w / 2), Math.max(1, h / 2), 0, 0, Math.PI * 2);
     if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
-    ctx.stroke();
+    if (stroke) ctx.stroke();
   } else if (s.type === 'line' || s.type === 'arrow') {
     const ax = p1.ix, ay = p1.iy;
     const bx = p2.ix, by = p2.iy;
@@ -1320,6 +1341,7 @@ function drawShape(ctx, s, t, selected) {
   }
 
   if (selected) {
+    ctx.globalAlpha = 1;
     ctx.setLineDash([5 * rs / 2, 4 * rs / 2]);
     ctx.strokeStyle = 'rgba(59, 130, 246, 0.95)';
     ctx.lineWidth = Math.max(1.5, rs * 0.8);
@@ -1484,7 +1506,7 @@ function openAnnotTextInput(cssX, cssY, ix, iy) {
     const base = {
       id: 0, type: 'text',
       stroke: state.annotStroke, fill: state.annotFill,
-      thickness: state.annotWidth, dash: state.annotDash,
+      thickness: state.annotWidth, dash: state.annotDash, opacity: state.annotOpacity ?? 1,
       x1: pt.x, y1: pt.y, x2: pt.x + wPt, y2: pt.y - hPt,
       text: txt, fontSize,
     };
@@ -1534,7 +1556,11 @@ function buildXFDF(side) {
       else if (s.dash === 'dotted') borderStyle = ` style="dash" dashes="${Math.max(0.5, lw)},${lw * 2}"`;
       const fillAttr = s.fill ? ` interior-color="${s.fill}"` : '';
       const author = esc(state.annotAuthor || 'ADP');
-      const common = `page="${page}" color="${s.stroke || '#ff2d2d'}"${fillAttr} date="${date}" title="${author}" flags="print" width="${lw}"${borderStyle}`;
+      const opacity = annotOpacityOf(s);
+      const opacityAttr = opacity < 1 ? ` opacity="${n2(opacity)}"` : '';
+      const stroke = annotStrokeOf(s);
+      const strokeAttr = stroke ? ` color="${stroke}" width="${lw}"${borderStyle}` : ' width="0"';
+      const common = `page="${page}"${strokeAttr}${fillAttr}${opacityAttr} date="${date}" title="${author}" flags="print"`;
       if (s.type === 'rect') {
         out.push(`<square ${common} rect="${rect}"/>`);
       } else if (s.type === 'ellipse') {
@@ -1598,7 +1624,7 @@ function outlinePoints(outline) {
 
 function shapeToEditorValue(s, page) {
   // 注: pdf.js のインク注釈は線色/線幅のみ対応。塗り・線種は XFDF 書き出しで保持される。
-  const color = hexToRgbArr(s.stroke || s.color || '#ff2d2d');
+  const color = hexToRgbArr(annotStrokeOf(s) || '#ff2d2d');
   const x1 = Math.min(s.x1, s.x2), y1 = Math.min(s.y1, s.y2);
   const x2 = Math.max(s.x1, s.x2), y2 = Math.max(s.y1, s.y2);
   const rect = [x1 - 4, y1 - 4, x2 + 4, y2 + 4];
@@ -1683,8 +1709,8 @@ function regionToShape(r, rs, pageH, sideShiftX, sideShiftY) {
   const yBottom = pageH - (r.y + r.h) / rs - pad + sideShiftY;
   return {
     id: annotIdSeq++, type: 'rect',
-    stroke: state.annotStroke, fill: state.annotFill,
-    thickness: state.annotWidth, dash: state.annotDash,
+    stroke: state.annotNoStroke && state.annotFill ? null : state.annotStroke, fill: state.annotFill,
+    thickness: state.annotWidth, dash: state.annotDash, opacity: state.annotOpacity ?? 1,
     x1, y1: yBottom, x2, y2: yTop,
   };
 }
@@ -1735,7 +1761,7 @@ async function autoAnnotateRegions(scope = 'page') {
 
   const docA = state.docA, docB = state.docB;
   const signature = () => JSON.stringify([state.pageMap,state.pageBOffset,state.sensitivity,state.quality,
-    state.offsetDx,state.offsetDy,state.annotTarget,state.annotStroke,state.annotFill,state.annotWidth,state.annotDash]);
+    state.offsetDx,state.offsetDy,state.annotTarget,state.annotStroke,state.annotNoStroke,state.annotFill,state.annotWidth,state.annotDash,state.annotOpacity]);
   const initialSignature=signature();
   const assertCurrent=()=>{if(docA!==state.docA || docB!==state.docB || signature()!==initialSignature)throw new Error('ファイルまたは設定が変更されました。新しい条件で再実行してください。');};
   const staged=[];
@@ -1802,16 +1828,20 @@ function n2(v) { return Math.round(v * 100) / 100; }
 
 // 外観ストリーム(AP)を生成 — Acrobat以外のビューアでも見た目を保証する
 function buildApOps(s, w, h, pad) {
-  const [r, g, b] = hexToRgb01(s.stroke || '#ff2d2d');
+  const stroke = annotStrokeOf(s);
   const lw = Math.max(0.5, s.thickness ?? 1);
-  let ops = `${r} ${g} ${b} RG ${n2(lw)} w 1 j`;
-  if (s.dash === 'dashed') ops += ` [${n2(lw * 3)} ${n2(lw * 2)}] 0 d`;
-  else if (s.dash === 'dotted') ops += ` [${n2(Math.max(0.5, lw))} ${n2(lw * 2)}] 0 d 1 J`;
-  let paintOp = 'S';
+  let ops = '1 j';
+  if (stroke) {
+    const [r, g, b] = hexToRgb01(stroke);
+    ops = `${r} ${g} ${b} RG ${n2(lw)} w 1 j`;
+    if (s.dash === 'dashed') ops += ` [${n2(lw * 3)} ${n2(lw * 2)}] 0 d`;
+    else if (s.dash === 'dotted') ops += ` [${n2(Math.max(0.5, lw))} ${n2(lw * 2)}] 0 d 1 J`;
+  }
+  let paintOp = stroke ? 'S' : 'n';
   if (s.fill && s.type !== 'arrow') {
     const [fr, fg, fb] = hexToRgb01(s.fill);
     ops += ` ${fr} ${fg} ${fb} rg`;
-    paintOp = 'B';
+    paintOp = stroke ? 'B' : 'f';
   }
   const x0 = pad, y0 = pad, iw = w - pad * 2, ih = h - pad * 2;
   if (s.type === 'rect') {
@@ -1849,10 +1879,12 @@ function makeNativeAnnot(pdfDoc, page, s, mDate) {
   const x1 = Math.min(s.x1, s.x2) - pad, y1 = Math.min(s.y1, s.y2) - pad;
   const x2 = Math.max(s.x1, s.x2) + pad, y2 = Math.max(s.y1, s.y2) + pad;
   const w = x2 - x1, h = y2 - y1;
-  const strokeRgb = hexToRgb01(s.stroke || '#ff2d2d');
+  const stroke = annotStrokeOf(s);
+  const strokeRgb = hexToRgb01(stroke || '#ff2d2d');
 
-  const bs = { W: lw, S: 'S' };
-  if (s.dash === 'dashed') { bs.S = 'D'; bs.D = [n2(lw * 3), n2(lw * 2)]; }
+  const bs = { W: stroke ? lw : 0, S: 'S' };
+  if (!stroke) { /* 線なし: 枠線幅0・C は空配列 (透明) */ }
+  else if (s.dash === 'dashed') { bs.S = 'D'; bs.D = [n2(lw * 3), n2(lw * 2)]; }
   else if (s.dash === 'dotted') { bs.S = 'D'; bs.D = [n2(Math.max(0.5, lw)), n2(lw * 2)]; }
 
   const author = state.annotAuthor || 'ADP';
@@ -1866,7 +1898,7 @@ function makeNativeAnnot(pdfDoc, page, s, mDate) {
       Rect: [n2(x1), n2(y1), n2(x2), n2(y2)],
       Contents: PDFHexString.fromText(s.text || ''),
       DA: PDFString.of(`${strokeRgb.join(' ')} rg /Helv ${fontSize} Tf`),
-      BS: { W: 0 },
+      BS: { W: 0 }, CA: annotOpacityOf(s),
       F: 4, T: PDFHexString.fromText(author), M: PDFString.of(mDate),
       P: page.ref, NM: PDFString.of(`SABUN-${Date.now()}-${s.id}`), Subject: PDFHexString.fromText('SABUN 注釈'),
     });
@@ -1875,7 +1907,7 @@ function makeNativeAnnot(pdfDoc, page, s, mDate) {
       Type: 'Annot',
       Subtype: s.type === 'rect' ? 'Square' : s.type === 'ellipse' ? 'Circle' : 'Line',
       Rect: [n2(x1), n2(y1), n2(x2), n2(y2)],
-      C: strokeRgb, CA: 1, F: 4, BS: bs,
+      C: stroke ? strokeRgb : [], CA: annotOpacityOf(s), F: 4, BS: bs,
       T: PDFHexString.fromText(author), M: PDFString.of(mDate),
       P: page.ref, NM: PDFString.of(`SABUN-${Date.now()}-${s.id}`), Subject: PDFHexString.fromText('SABUN 注釈'),
     };
@@ -1891,9 +1923,10 @@ function makeNativeAnnot(pdfDoc, page, s, mDate) {
     dict = ctx.obj(base);
     // 外観ストリームを添付 (Acrobat 以外のビューアでの表示保証)
     try {
-      const apStream = ctx.stream(buildApOps(s, w, h, pad), {
-        Type: 'XObject', Subtype: 'Form', BBox: [0, 0, n2(w), n2(h)],
-      });
+      const opacity = annotOpacityOf(s);
+      const apDict = { Type: 'XObject', Subtype: 'Form', BBox: [0, 0, n2(w), n2(h)] };
+      if (opacity < 1) apDict.Resources = { ExtGState: { GS0: { Type: 'ExtGState', CA: opacity, ca: opacity } } };
+      const apStream = ctx.stream((opacity < 1 ? '/GS0 gs ' : '') + buildApOps(s, w, h, pad), apDict);
       dict.set(PDFName.of('AP'), ctx.obj({ N: ctx.register(apStream) }));
     } catch { /* AP無しでも Acrobat は描画できる */ }
   }
@@ -2133,7 +2166,8 @@ function updateAnnotListPanel() {
         sideBadge.textContent = side.toUpperCase();
         const chip = document.createElement('span');
         chip.className = 'annot-color-chip';
-        chip.style.background = sh.stroke || '#ff2d2d';
+        chip.style.background = annotStrokeOf(sh) || sh.fill || '#ff2d2d';
+        chip.style.opacity = annotOpacityOf(sh);
         const label = document.createElement('span');
         label.className = 'annot-item-label';
         const desc = sh.type === 'text' ? `「${(sh.text || '').slice(0, 14)}」` : typeNames[sh.type] || sh.type;
@@ -2444,8 +2478,8 @@ function annotMouseDown(ix, iy, cssX, cssY, altKey = false, shiftKey = false) {
   const pt = imageToPdfT(sideTransform(side), ix, iy);
   state.annotDraft = {
     id: annotIdSeq++, type: tool,
-    stroke: state.annotStroke, fill: state.annotFill,
-    thickness: state.annotWidth, dash: state.annotDash,
+    stroke: state.annotNoStroke && state.annotFill && (tool === 'rect' || tool === 'ellipse') ? null : state.annotStroke, fill: state.annotFill,
+    thickness: state.annotWidth, dash: state.annotDash, opacity: state.annotOpacity ?? 1,
     x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
   };
   return true;
@@ -4596,38 +4630,249 @@ function applyStyleToSelection(patch) {
   for(const s of selectedAnnots())Object.assign(s, patch);
   drawAnnotsOverlay();
 }
-if (annotStrokeInput) {
-  annotStrokeInput.addEventListener('input', () => {
-    state.annotStroke = annotStrokeInput.value;
-    applyStyleToSelection({ stroke: state.annotStroke });
-    document.querySelectorAll('[data-annot-color]').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.annotColor.toLowerCase() === state.annotStroke.toLowerCase());
-    });
-  });
+// ── 注釈のカラーパレット (Acrobat のコメント用パレットに準拠) ──
+// Acrobat の画面キャプチャ (Adobe RGB) を sRGB へ変換した値。赤 #DB3425 で照合済み。
+// 3段目の空き2枠は「その他の色」で指定したカスタム色 (直近2色を保存)。
+const ANNOT_PALETTE = [
+  ['#1373e8','青'],['#078a1c','緑'],['#ffc100','黄'],['#ff6200','オレンジ'],['#db3425','赤'],['#c037c4','紫'],['#9643fc','バイオレット'],
+  ['#38e5ff','水色'],['#c5fb72','黄緑'],['#fcf485','薄い黄'],['#ffa97b','薄いオレンジ'],['#f86464','薄い赤'],['#fb88ff','薄い紫'],['#dcaaff','薄いバイオレット'],
+  ['#ffffff','白'],['#cccccc','薄いグレー'],['#aaaaaa','グレー'],['#767676','濃いグレー'],null,null,['#000000','黒'],
+];
+const ANNOT_PALETTE_COLUMNS = 7;
+const CUSTOM_COLOR_KEY = 'sabun_annot_custom_colors';
+const colorPopover = $('annot-color-popover');
+let colorPopoverTarget = 'stroke', colorPopoverAnchor = null;
+let customColors = [];
+try {
+  const saved = JSON.parse(localStorage.getItem(CUSTOM_COLOR_KEY) || '[]');
+  if (Array.isArray(saved)) customColors = saved.map(normalizeHex).filter(Boolean).slice(0, 2);
+} catch { /* ignore */ }
+
+function normalizeHex(value) {
+  let v = String(value || '').trim();
+  if (!v.startsWith('#')) v = '#' + v;
+  if (/^#[0-9a-f]{3}$/i.test(v)) v = '#' + [...v.slice(1)].map(c => c + c).join('');
+  return /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null;
 }
-document.querySelectorAll('[data-annot-color]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    if (!annotStrokeInput) return;
-    annotStrokeInput.value = btn.dataset.annotColor;
-    annotStrokeInput.dispatchEvent(new Event('input', { bubbles: true }));
+function addCustomColor(color) {
+  if (!color || ANNOT_PALETTE.some(entry => entry && entry[0] === color)) return;
+  customColors = [color, ...customColors.filter(c => c !== color)].slice(0, 2);
+  try { localStorage.setItem(CUSTOM_COLOR_KEY, JSON.stringify(customColors)); } catch { /* ignore */ }
+}
+// 選択中の注釈があればその値、なければ新規作成の既定値
+function annotStyleSource() {
+  return state.selectedAnnot || { stroke: state.annotNoStroke ? null : state.annotStroke, fill: state.annotFill, opacity: state.annotOpacity };
+}
+function popoverColor() {
+  const src = annotStyleSource();
+  return colorPopoverTarget === 'fill' ? (src.fill || null) : annotStrokeOf(src);
+}
+function paintColorChip(chip, color, opacity) {
+  if (!chip) return;
+  chip.classList.toggle('none', !color);
+  chip.style.setProperty('--chip', color || 'transparent');
+  chip.style.setProperty('--chip-opacity', String(opacity ?? 1));
+}
+function updateAnnotColorChips() {
+  const src = annotStyleSource();
+  paintColorChip($('annot-stroke-chip'), annotStrokeOf(src), src.opacity);
+  paintColorChip($('annot-fill-chip'), src.fill || null, src.opacity);
+  paintColorChip($('annot-quick-chip'), annotStrokeOf(src), src.opacity);
+}
+function renderColorPopover() {
+  const current = popoverColor();
+  const grid = $('acp-grid');
+  // ボタンは一度だけ作り、以後は属性だけ更新する。mouseup 時の再描画で要素を
+  // 置き換えると、押したボタンが消えて実際のマウス操作では click が発生しない。
+  if (!grid.children.length) {
+    for (let i = 0; i < ANNOT_PALETTE.length; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'acp-swatch';
+      grid.appendChild(btn);
+    }
+  }
+  let customIndex = 0;
+  ANNOT_PALETTE.forEach((entry, i) => {
+    const color = entry ? entry[0] : (customColors[customIndex] || null);
+    const label = entry ? entry[1] : `カスタム${customIndex + 1}`;
+    if (!entry) customIndex++;
+    const btn = grid.children[i];
+    btn.classList.remove('empty', 'selected');
+    btn.style.removeProperty('--swatch');
+    btn.style.removeProperty('--check');
+    delete btn.dataset.color;
+    delete btn.dataset.empty;
+    btn.removeAttribute('aria-pressed');
+    if (color) {
+      const [r, g, b] = hexToRgbArr(color);
+      const selected = color === current;
+      btn.dataset.color = color;
+      btn.style.setProperty('--swatch', color);
+      btn.style.setProperty('--check', r * 0.299 + g * 0.587 + b * 0.114 > 160 ? '#111' : '#fff');
+      btn.classList.toggle('selected', selected);
+      btn.setAttribute('aria-pressed', String(selected));
+      btn.title = `${label} ${color.toUpperCase()}`;
+      btn.setAttribute('aria-label', label);
+    } else {
+      btn.classList.add('empty');
+      btn.dataset.empty = '1';
+      btn.title = `${label}: その他の色で追加`;
+      btn.setAttribute('aria-label', `${label} 未設定 (その他の色を開く)`);
+    }
   });
+  $('annot-color-title').textContent = colorPopoverTarget === 'fill' ? '塗りのカラー' : '線のカラー';
+  const none = $('acp-none'), noneBlock = noneBlockedReason();
+  none.textContent = colorPopoverTarget === 'fill' ? '塗りなし' : '線なし';
+  none.disabled = !!noneBlock;
+  none.title = noneBlock || '';
+  none.classList.toggle('selected', !current);
+  none.setAttribute('aria-pressed', String(!current));
+  const hex = $('acp-hex');
+  if (document.activeElement !== hex) { hex.value = current ? current.toUpperCase() : ''; hex.classList.remove('invalid'); }
+  $('acp-picker').value = current || '#ffffff';
+  const pct = Math.round((annotStyleSource().opacity ?? 1) * 100);
+  if (document.activeElement !== $('acp-opacity-number')) $('acp-opacity-number').value = pct;
+  $('acp-opacity-range').value = pct;
+}
+// 「なし」を選べない理由。線と塗りの両方が「なし」だと注釈が見えなくなるため禁止する。
+function noneBlockedReason() {
+  const shapes = state.selectedAnnot ? selectedAnnots() : null;
+  if (colorPopoverTarget === 'fill') {
+    if (shapes ? shapes.every(s => !annotStrokeOf(s)) : state.annotNoStroke) return '線が「なし」のため、塗りを「なし」にはできません';
+    return '';
+  }
+  if (shapes) {
+    if (!shapes.some(isStrokeOptional)) return '線・矢印・テキストは線を「なし」にできません';
+    if (!shapes.some(s => isStrokeOptional(s) && s.fill)) return '塗りが「なし」のため、線を「なし」にはできません';
+    return '';
+  }
+  return state.annotFill ? '' : '塗りが「なし」のため、線を「なし」にはできません';
+}
+// 選択中の注釈ごとに変更を判定する (patch を返さない注釈は変更しない)
+function applyStylePerShape(patchFor) {
+  if (!state.selectedAnnot) return 0;
+  let skipped = 0;
+  for (const s of selectedAnnots()) { const patch = patchFor(s); if (patch) Object.assign(s, patch); else skipped++; }
+  drawAnnotsOverlay();
+  return skipped;
+}
+function setAnnotColor(color) {
+  let skipped = 0;
+  if (colorPopoverTarget === 'fill') {
+    if (color || !state.annotNoStroke) state.annotFill = color;
+    skipped = applyStylePerShape(s => (!color && !annotStrokeOf(s)) ? null : { fill: color });
+  } else if (color) {
+    state.annotStroke = color;
+    state.annotNoStroke = false;
+    applyStylePerShape(() => ({ stroke: color }));
+  } else {
+    if (state.annotFill) state.annotNoStroke = true;
+    skipped = applyStylePerShape(s => (isStrokeOptional(s) && s.fill) ? { stroke: null } : null);
+  }
+  if (skipped) setStatus(colorPopoverTarget === 'fill'
+    ? `線が「なし」の注釈${skipped}件は塗りを残しました`
+    : `線・矢印・テキスト、または塗りのない注釈${skipped}件は線を残しました`, 4000);
+  updateAnnotColorChips();
+  if (!colorPopover.hidden) renderColorPopover();
+}
+// live=true はスライダー/ピッカー操作中。履歴は操作終了時に1件だけ積む。
+function setAnnotOpacity(pct, live) {
+  const n = Number(pct);
+  if (!Number.isFinite(n)) return;
+  state.annotOpacity = Math.max(0, Math.min(100, Math.round(n))) / 100;
+  state.annotStyleScrub = !!live;
+  applyStyleToSelection({ opacity: state.annotOpacity });
+  if (!live) rememberAnnots();
+  updateAnnotColorChips();
+  if (!colorPopover.hidden) renderColorPopover();
+}
+function positionColorPopover() {
+  if (!colorPopoverAnchor) return;
+  const r = colorPopoverAnchor.getBoundingClientRect();
+  const w = colorPopover.offsetWidth, h = colorPopover.offsetHeight;
+  let top = r.bottom + 6;
+  if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  colorPopover.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+  colorPopover.style.top = top + 'px';
+}
+function openColorPopover(target, anchor) {
+  if (!colorPopover.hidden && colorPopoverAnchor === anchor) { closeColorPopover(true); return; }
+  colorPopoverAnchor?.setAttribute('aria-expanded', 'false');
+  colorPopoverTarget = target;
+  colorPopoverAnchor = anchor;
+  anchor.setAttribute('aria-expanded', 'true');
+  renderColorPopover();
+  colorPopover.hidden = false;
+  positionColorPopover();
+  (colorPopover.querySelector('.acp-swatch.selected') || colorPopover.querySelector('.acp-none:not([hidden])') || colorPopover.querySelector('.acp-swatch')).focus();
+}
+function closeColorPopover(focusAnchor = false) {
+  if (colorPopover.hidden) return;
+  if (state.annotStyleScrub) { state.annotStyleScrub = false; rememberAnnots(); }
+  colorPopover.hidden = true;
+  colorPopoverAnchor?.setAttribute('aria-expanded', 'false');
+  if (focusAnchor && colorPopoverAnchor?.isConnected && colorPopoverAnchor.offsetParent) colorPopoverAnchor.focus();
+  colorPopoverAnchor = null;
+}
+function openColorPicker() {
+  const picker = $('acp-picker');
+  picker.value = popoverColor() || '#ffffff';
+  try { picker.showPicker(); } catch { picker.click(); }
+}
+document.querySelectorAll('.annot-color-btn').forEach(btn => {
+  btn.addEventListener('click', () => openColorPopover(btn.dataset.colorTarget, btn));
 });
-function currentFill() {
-  return (annotFillEnable && annotFillEnable.checked) ? (annotFillInput ? annotFillInput.value : '#ffe14d') : null;
-}
-if (annotFillEnable) {
-  annotFillEnable.addEventListener('change', () => {
-    if (annotFillInput) annotFillInput.disabled = !annotFillEnable.checked;
-    state.annotFill = currentFill();
-    applyStyleToSelection({ fill: state.annotFill });
-  });
-}
-if (annotFillInput) {
-  annotFillInput.addEventListener('input', () => {
-    state.annotFill = currentFill();
-    applyStyleToSelection({ fill: state.annotFill });
-  });
-}
+$('acp-grid').addEventListener('click', e => {
+  const btn = e.target.closest('.acp-swatch');
+  if (!btn) return;
+  if (btn.dataset.empty) openColorPicker();
+  else setAnnotColor(btn.dataset.color);
+});
+$('acp-grid').addEventListener('keydown', e => {
+  const cells = [...$('acp-grid').children];
+  const i = cells.indexOf(document.activeElement);
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -ANNOT_PALETTE_COLUMNS, ArrowDown: ANNOT_PALETTE_COLUMNS }[e.key];
+  if (i < 0 || !step) return;
+  e.preventDefault();
+  cells[Math.max(0, Math.min(cells.length - 1, i + step))].focus();
+});
+$('acp-none').addEventListener('click', () => setAnnotColor(null));
+$('acp-more').addEventListener('click', openColorPicker);
+$('acp-picker').addEventListener('input', e => { state.annotStyleScrub = true; setAnnotColor(e.target.value.toLowerCase()); });
+$('acp-picker').addEventListener('change', e => {
+  state.annotStyleScrub = false;
+  addCustomColor(e.target.value.toLowerCase());
+  setAnnotColor(e.target.value.toLowerCase());
+  rememberAnnots();
+});
+$('acp-hex').addEventListener('change', e => {
+  const color = normalizeHex(e.target.value);
+  e.target.classList.toggle('invalid', !color);
+  if (!color) { e.target.title = '#RRGGBB 形式で入力してください'; return; }
+  e.target.title = '';
+  addCustomColor(color);
+  setAnnotColor(color);
+  e.target.value = color.toUpperCase();
+});
+$('acp-hex').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.target.dispatchEvent(new Event('change')); } });
+$('acp-opacity-range').addEventListener('input', e => setAnnotOpacity(e.target.value, true));
+$('acp-opacity-range').addEventListener('change', e => setAnnotOpacity(e.target.value, false));
+$('acp-opacity-number').addEventListener('input', e => { if (e.target.value !== '' && e.target.validity.valid) setAnnotOpacity(e.target.value, true); });
+$('acp-opacity-number').addEventListener('change', e => {
+  if (e.target.value === '') { e.target.value = Math.round(state.annotOpacity * 100); return; }
+  setAnnotOpacity(e.target.value, false);
+  e.target.value = Math.round(state.annotOpacity * 100);
+});
+colorPopover.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); closeColorPopover(true); }
+  e.stopPropagation(); // 数字キー等の表示切替ショートカットをパレット操作中は発火させない
+});
+document.addEventListener('mousedown', e => {
+  if (!colorPopover.hidden && !colorPopover.contains(e.target) && !e.target.closest('.annot-color-btn')) closeColorPopover();
+}, true);
+window.addEventListener('resize', () => closeColorPopover());
+updateAnnotColorChips();
 if (annotWidthSelect) {
   annotWidthSelect.addEventListener('change', () => {
     state.annotWidth = parseFloat(annotWidthSelect.value) || 1;
@@ -5089,6 +5334,8 @@ function updateAnnotQuickEdit() {
   const box=$('annot-quick-edit');if(!box)return;
   const selected=selectedAnnots();
   box.hidden=!selected.length || !annotBar || annotBar.hidden || !!state.annotDrag || !!state.annotResize;
+  updateAnnotColorChips();
+  if(!$('annot-color-popover').hidden){if(colorPopoverAnchor===$('annot-quick-color')&&box.hidden&&!state.annotStyleScrub)closeColorPopover();else renderColorPopover();}
   $('btn-annot-undo').disabled=annotHistoryIndex<=0;
   $('btn-annot-redo').disabled=annotHistoryIndex>=annotHistory.length-1;
   if(box.hidden)return;
@@ -5100,14 +5347,12 @@ function updateAnnotQuickEdit() {
   const scale=state.zoomFactor/(state.renderScale||DPR);
   box.style.left=Math.max(8,Math.min(viewContainer.clientWidth-250,state.panX+bb.x*scale))+'px';
   box.style.top=Math.max(8,Math.min(viewContainer.clientHeight-45,state.panY+bb.y*scale-42))+'px';
-  if(document.activeElement!==$('annot-quick-color'))$('annot-quick-color').value=shape.stroke||'#ff2d2d';
   for(const row of document.querySelectorAll('.annot-item[data-annot-id]'))row.classList.toggle('current',selected.some(s=>String(s.id)===row.dataset.annotId));
 }
 $('btn-annot-undo').addEventListener('click',()=>restoreAnnots(-1));
 $('btn-annot-redo').addEventListener('click',()=>restoreAnnots(1));
 $('annot-quick-copy').addEventListener('click',duplicateSelectedAnnots);
 $('annot-quick-delete').addEventListener('click',deleteSelectedAnnot);
-$('annot-quick-color').addEventListener('change',e=>{state.annotStroke=e.target.value;if(annotStrokeInput)annotStrokeInput.value=e.target.value;applyStyleToSelection({stroke:e.target.value});});
 $('annot-quick-edit').addEventListener('mousedown',e=>e.stopPropagation());
 window.addEventListener('mouseup',()=>{rememberAnnots();updateAnnotQuickEdit();});
 document.addEventListener('keydown',e=>{
