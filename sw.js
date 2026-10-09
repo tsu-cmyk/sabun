@@ -2,7 +2,7 @@
  * SABUN PWA — Service Worker
  * ライブラリとHTMLをキャッシュしてオフライン動作を実現
  */
-const CACHE_NAME = 'sabun-v73';
+const CACHE_NAME = 'sabun-v77';
 const PRECACHE = [
   './',
   './index.html',
@@ -20,6 +20,8 @@ const PRECACHE = [
   './lib/diff_match_patch.js',
   './lib/diff-worker.js',
   './lib/pdf-lib.min.js',
+  './lib/wasm/jbig2_nowasm_fallback.js',
+  './lib/wasm/openjpeg_nowasm_fallback.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
